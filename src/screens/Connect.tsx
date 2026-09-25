@@ -195,7 +195,7 @@ export default function Connect() {
           )}
           {profiles.map((p) => (
             <li key={p.id}>
-              <Card className="gap-3 py-4 transition-[box-shadow,border-color] duration-150 hover:border-brand/30 hover:shadow-sm">
+              <Card className="gap-3 py-4">
                 <CardContent className="flex items-center justify-between gap-3 px-5">
                   <div className="flex min-w-0 flex-col">
                     <span className="truncate font-medium text-card-foreground">{p.name}</span>
@@ -210,11 +210,7 @@ export default function Connect() {
                     <Button variant="outline" onClick={() => startEdit(p)} disabled={connectingId !== null}>
                       Изменить
                     </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => void deleteProfile(p.id)}
-                      className="hover:border-destructive/50 hover:bg-destructive/5 hover:text-destructive"
-                    >
+                    <Button variant="outline" onClick={() => void deleteProfile(p.id)}>
                       Удалить
                     </Button>
                     <Button variant="default" onClick={() => connect(p)} disabled={connectingId !== null}>
