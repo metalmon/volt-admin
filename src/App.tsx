@@ -1,6 +1,8 @@
 import { useState } from "react";
 import reactLogo from "./assets/react.svg";
+import voltLogo from "./assets/logo.svg";
 import { invoke } from "@tauri-apps/api/core";
+import { Spinner } from "./components/ui/spinner";
 import "./App.css";
 
 function App() {
@@ -14,7 +16,12 @@ function App() {
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+      <h1 style={{ fontFamily: "var(--font-heading)" }}>Welcome to Volt Admin</h1>
+
+      <div className="row" style={{ alignItems: "center", gap: "0.5rem" }}>
+        <img src={voltLogo} alt="Volt logo" style={{ height: "2rem" }} />
+        <Spinner size={24} className="text-brand" />
+      </div>
 
       <div className="row">
         <a href="https://vite.dev" target="_blank">

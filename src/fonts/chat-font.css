@@ -1,0 +1,41 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/* Copied verbatim from Thunderbolt (fork-owned, metalmon), master:
+ * src/fork/typography/chat-font.css. Plantin Cyr MT is the bundled serif
+ * (Latin + Cyrillic). Font-face paths adjusted: the .woff2 files sit
+ * alongside this stylesheet in src/fonts/ (Thunderbolt keeps a nested
+ * fonts/ subdirectory; Volt Admin flattens it). The chat-font-toggle /
+ * data-chat-font runtime (settings UI, --font-size-body coupling) is a
+ * Thunderbolt chat-app feature and was not carried over — only the raw
+ * @font-face declarations, which index.css's --font-heading consumes. */
+
+@font-face {
+  font-family: 'Plantin Cyr MT';
+  src: url('./plantin-cyr.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plantin Cyr MT';
+  src: url('./plantin-cyr-bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plantin Cyr MT';
+  src: url('./plantin-cyr-italic.woff2') format('woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Plantin Cyr MT';
+  src: url('./plantin-cyr-bolditalic.woff2') format('woff2');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
