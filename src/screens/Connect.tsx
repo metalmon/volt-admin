@@ -52,13 +52,22 @@ const modeLabels: Record<ConnMode, string> = {
   remote: 'По сети',
 }
 
-export default function Connect() {
+interface ConnectProps {
+  /** Called with the panel base URL once `connect()` resolves. */
+  onConnected: (baseUrl: string) => void
+}
+
+export default function Connect({ onConnected }: ConnectProps) {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [connectingId, setConnectingId] = useState<string | null>(null)
   const [formOpen, setFormOpen] = useState(false)
   const [draft, setDraft] = useState<Draft>(emptyDraft())
+  // Password-auth profiles need a transient prompt at connect time — the
+  // password itself is never persisted (see `Profile` above).
+  const [passwordPromptId, setPasswordPromptId] = useState<string | null>(null)
+  const [passwordValue, setPasswordValue] = useState('')
 
   const refresh = async () => {
     try {
@@ -101,19 +110,29 @@ export default function Connect() {
     }
   }
 
-  const connect = async (profile: Profile) => {
+  const doConnect = async (profile: Profile, password?: string) => {
     setConnectingId(profile.id)
     setError(null)
     try {
-      // Actual tunnel/attach flow lands in task B4 (`connect_profile`, plus
-      // transient password prompt for auth: "password"). For now this only
-      // exercises the connecting state and the store round-trip.
-      await invoke('connect_profile', { profile })
+      const baseUrl = await invoke<string>('connect', { profile, password })
+      setPasswordPromptId(null)
+      setPasswordValue('')
+      onConnected(baseUrl)
     } catch (e) {
-      setError(`Подключение пока не реализовано: ${String(e)}`)
+      setError(`Не удалось подключиться: ${String(e)}`)
     } finally {
       setConnectingId(null)
     }
+  }
+
+  const connect = (profile: Profile) => {
+    if (profile.mode === 'remote' && profile.auth === 'password' && passwordPromptId !== profile.id) {
+      setError(null)
+      setPasswordPromptId(profile.id)
+      setPasswordValue('')
+      return
+    }
+    void doConnect(profile, passwordPromptId === profile.id ? passwordValue : undefined)
   }
 
   return (
@@ -144,36 +163,74 @@ export default function Connect() {
           {profiles.map((p) => (
             <li
               key={p.id}
-              className="flex items-center justify-between gap-3 rounded-[var(--radius)] border border-border bg-card px-4 py-3 shadow-xs"
+              className="flex flex-col gap-3 rounded-[var(--radius)] border border-border bg-card px-4 py-3 shadow-xs"
             >
-              <div className="flex flex-col">
-                <span className="font-medium text-card-foreground">{p.name}</span>
-                <span className="text-xs text-muted-foreground">
-                  {modeLabels[p.mode]}
-                  {p.mode === 'remote' ? ` · ${p.user}@${p.host}:${p.port}` : ` · порт панели ${p.panelPort}`}
-                </span>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-col">
+                  <span className="font-medium text-card-foreground">{p.name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {modeLabels[p.mode]}
+                    {p.mode === 'remote' ? ` · ${p.user}@${p.host}:${p.port}` : ` · порт панели ${p.panelPort}`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => connect(p)}
+                    disabled={connectingId !== null}
+                    className={cn(
+                      'inline-flex items-center gap-2 rounded-[var(--radius)] bg-brand px-3 py-1.5 text-sm font-medium text-brand-foreground',
+                      'disabled:opacity-50',
+                    )}
+                  >
+                    {connectingId === p.id ? <Spinner size={14} /> : null}
+                    Подключить
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void deleteProfile(p.id)}
+                    className="rounded-[var(--radius)] border border-border px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive"
+                  >
+                    Удалить
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void connect(p)}
-                  disabled={connectingId !== null}
-                  className={cn(
-                    'inline-flex items-center gap-2 rounded-[var(--radius)] bg-brand px-3 py-1.5 text-sm font-medium text-brand-foreground',
-                    'disabled:opacity-50',
-                  )}
+
+              {passwordPromptId === p.id && (
+                <form
+                  className="flex items-center gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    void doConnect(p, passwordValue)
+                  }}
                 >
-                  {connectingId === p.id ? <Spinner size={14} /> : null}
-                  Подключить
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void deleteProfile(p.id)}
-                  className="rounded-[var(--radius)] border border-border px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive"
-                >
-                  Удалить
-                </button>
-              </div>
+                  <input
+                    type="password"
+                    autoFocus
+                    value={passwordValue}
+                    onChange={(e) => setPasswordValue(e.currentTarget.value)}
+                    placeholder="Пароль SSH"
+                    className="flex-1 rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
+                  />
+                  <button
+                    type="submit"
+                    disabled={connectingId !== null}
+                    className="rounded-[var(--radius)] bg-brand px-3 py-1.5 text-sm font-medium text-brand-foreground disabled:opacity-50"
+                  >
+                    Войти
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPasswordPromptId(null)
+                      setPasswordValue('')
+                    }}
+                    className="rounded-[var(--radius)] border border-border px-3 py-1.5 text-sm text-muted-foreground"
+                  >
+                    Отмена
+                  </button>
+                </form>
+              )}
             </li>
           ))}
         </ul>
