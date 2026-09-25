@@ -216,6 +216,22 @@
   --color-sidebar-ring: #8a8a88;
 }
 
+/* Default every element's border color to the theme token. Tailwind v4 makes
+   a bare `border` utility resolve to `currentColor` (the text color) unless a
+   base rule sets otherwise — without this, cards and outline buttons drew
+   near-white borders in dark mode (currentColor = the light foreground). The
+   copied Thunderbolt components rely on this reset (see button.tsx's outline
+   variant, which uses a bare `border` expecting --color-border in both modes). */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-border);
+  }
+}
+
 body {
   margin: 0;
   min-height: 100vh;
