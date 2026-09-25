@@ -5,6 +5,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardFooter } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
 
@@ -56,22 +60,14 @@ const modeLabels: Record<ConnMode, string> = {
   remote: 'По сети',
 }
 
-// Fluent text-field feel, shared by every input/select in the form: clear
-// label above (in the markup, not here), a 1px border, and an
-// accent-colored ring on focus instead of the browser default outline.
-const fieldClass = cn(
-  'rounded-[4px] border border-input bg-background px-3 py-2 text-sm text-foreground',
-  'transition-colors duration-100',
-  'placeholder:text-muted-foreground',
-  'focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25',
-)
-
-interface ConnectProps {
-  /** Called with the panel base URL once `connect()` resolves. */
-  onConnected: (baseUrl: string) => void
-}
-
-export default function Connect({ onConnected }: ConnectProps) {
+/**
+ * Connection-profile picker/editor. This is the app's only React view — see
+ * `App.tsx`: once `connect()` resolves, the Rust side navigates the main
+ * window's webview top-level to the daemon panel, so there is no
+ * "connected" state to render here. Disconnecting reloads the webview back
+ * to this screen from scratch.
+ */
+export default function Connect() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -128,10 +124,12 @@ export default function Connect({ onConnected }: ConnectProps) {
     setConnectingId(profile.id)
     setError(null)
     try {
-      const baseUrl = await invoke<string>('connect', { profile, password })
+      // The `connect` command navigates the main window's webview
+      // top-level to the panel once it resolves — there is nothing further
+      // to do here on success (this screen is about to be replaced).
+      await invoke('connect', { profile, password })
       setPasswordPromptId(null)
       setPasswordValue('')
-      onConnected(baseUrl)
     } catch (e) {
       setError(`Не удалось подключиться: ${String(e)}`)
     } finally {
@@ -151,7 +149,7 @@ export default function Connect({ onConnected }: ConnectProps) {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-xl flex-col gap-6 px-6 py-10">
-      <header>
+      <header className="text-center">
         <h1 className="font-heading text-2xl text-foreground">Подключение</h1>
         <p className="text-sm text-muted-foreground">Выберите сохраненный профиль или добавьте новый.</p>
       </header>
@@ -175,240 +173,239 @@ export default function Connect({ onConnected }: ConnectProps) {
             </li>
           )}
           {profiles.map((p) => (
-            <li
-              key={p.id}
-              className={cn(
-                'flex flex-col gap-3 rounded-[var(--radius)] border border-border bg-card px-5 py-4 shadow-xs',
-                'transition-[box-shadow,border-color] duration-150 hover:border-brand/30 hover:shadow-sm',
-              )}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex flex-col">
-                  <span className="font-medium text-card-foreground">{p.name}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {modeLabels[p.mode]}
-                    {p.mode === 'remote' ? ` · ${p.user}@${p.host}:${p.port}` : ` · порт панели ${p.panelPort}`}
-                  </span>
-                </div>
-                {/* Fluent: secondary/dismissive action on the left, primary
-                    (positive) action rightmost. */}
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="secondary"
-                    onClick={() => void deleteProfile(p.id)}
-                    className="hover:border-destructive/50 hover:bg-destructive/5 hover:text-destructive"
-                  >
-                    Удалить
-                  </Button>
-                  <Button variant="primary" onClick={() => connect(p)} disabled={connectingId !== null}>
-                    {connectingId === p.id ? <Spinner size={14} /> : null}
-                    Подключить
-                  </Button>
-                </div>
-              </div>
+            <li key={p.id}>
+              <Card className="gap-3 py-4 transition-[box-shadow,border-color] duration-150 hover:border-brand/30 hover:shadow-sm">
+                <CardContent className="flex items-center justify-between gap-3 px-5">
+                  <div className="flex flex-col">
+                    <span className="font-medium text-card-foreground">{p.name}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {modeLabels[p.mode]}
+                      {p.mode === 'remote' ? ` · ${p.user}@${p.host}:${p.port}` : ` · порт панели ${p.panelPort}`}
+                    </span>
+                  </div>
+                  {/* Fluent: secondary/dismissive action on the left, primary
+                      (positive) action rightmost. */}
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => void deleteProfile(p.id)}
+                      className="hover:border-destructive/50 hover:bg-destructive/5 hover:text-destructive"
+                    >
+                      Удалить
+                    </Button>
+                    <Button variant="default" onClick={() => connect(p)} disabled={connectingId !== null}>
+                      {connectingId === p.id ? <Spinner size={14} /> : null}
+                      Подключить
+                    </Button>
+                  </div>
+                </CardContent>
 
-              {passwordPromptId === p.id && (
-                <form
-                  className="flex items-center gap-2"
-                  onSubmit={(e) => {
-                    e.preventDefault()
-                    void doConnect(p, passwordValue)
-                  }}
-                >
-                  <input
-                    type="password"
-                    autoFocus
-                    value={passwordValue}
-                    onChange={(e) => {
-                      const v = e.currentTarget.value
-                      setPasswordValue(v)
-                    }}
-                    placeholder="Пароль SSH"
-                    className={cn(fieldClass, 'flex-1')}
-                  />
-                  <Button
-                    variant="secondary"
-                    onClick={() => {
-                      setPasswordPromptId(null)
-                      setPasswordValue('')
-                    }}
-                  >
-                    Отмена
-                  </Button>
-                  <Button type="submit" variant="primary" disabled={connectingId !== null}>
-                    Войти
-                  </Button>
-                </form>
-              )}
+                {passwordPromptId === p.id && (
+                  <CardFooter className="px-5">
+                    <form
+                      className="flex w-full items-center gap-2"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        void doConnect(p, passwordValue)
+                      }}
+                    >
+                      <Input
+                        type="password"
+                        autoFocus
+                        value={passwordValue}
+                        onChange={(e) => {
+                          const v = e.currentTarget.value
+                          setPasswordValue(v)
+                        }}
+                        placeholder="Пароль SSH"
+                        className="flex-1"
+                      />
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setPasswordPromptId(null)
+                          setPasswordValue('')
+                        }}
+                      >
+                        Отмена
+                      </Button>
+                      <Button type="submit" variant="default" disabled={connectingId !== null}>
+                        Войти
+                      </Button>
+                    </form>
+                  </CardFooter>
+                )}
+              </Card>
             </li>
           ))}
         </ul>
       )}
 
       {formOpen ? (
-        <form
-          className="flex flex-col gap-4 rounded-[var(--radius)] border border-border bg-card p-5 shadow-xs"
-          onSubmit={(e) => {
-            e.preventDefault()
-            void saveDraft()
-          }}
-        >
-          <div className="flex gap-2">
-            {(['local', 'remote'] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() =>
-                  setDraft((d) => ({
-                    ...d,
-                    mode: m,
-                    host: m === 'local' ? '127.0.0.1' : d.host === '127.0.0.1' ? '' : d.host,
-                  }))
-                }
-                className={cn(
-                  'flex-1 rounded-[4px] border px-3 py-2 text-sm transition-colors duration-100',
-                  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand',
-                  draft.mode === m
-                    ? 'border-brand bg-brand text-brand-foreground'
-                    : 'border-border bg-transparent text-muted-foreground hover:border-brand/40 hover:text-foreground',
-                )}
-              >
-                {modeLabels[m]}
-              </button>
-            ))}
-          </div>
-
-          <label className="flex flex-col gap-1.5 text-sm text-foreground">
-            Название
-            <input
-              className={fieldClass}
-              value={draft.name}
-              onChange={(e) => {
-                const v = e.currentTarget.value
-                setDraft((d) => ({ ...d, name: v }))
-              }}
-              placeholder="Мой сервер"
-              required
-            />
-          </label>
-
-          {draft.mode === 'remote' && (
-            <>
-              <div className="flex gap-3">
-                <label className="flex flex-1 flex-col gap-1.5 text-sm text-foreground">
-                  Хост
-                  <input
-                    className={fieldClass}
-                    value={draft.host}
-                    onChange={(e) => {
-                      const v = e.currentTarget.value
-                      setDraft((d) => ({ ...d, host: v }))
-                    }}
-                    placeholder="example.com"
-                    required
-                  />
-                </label>
-                <label className="flex w-24 flex-col gap-1.5 text-sm text-foreground">
-                  SSH-порт
-                  <input
-                    type="number"
-                    className={fieldClass}
-                    value={draft.port}
-                    onChange={(e) => {
-                      const v = Number(e.currentTarget.value)
-                      setDraft((d) => ({ ...d, port: v }))
-                    }}
-                  />
-                </label>
-              </div>
-
-              <label className="flex flex-col gap-1.5 text-sm text-foreground">
-                Пользователь
-                <input
-                  className={fieldClass}
-                  value={draft.user}
-                  onChange={(e) => {
-                    const v = e.currentTarget.value
-                    setDraft((d) => ({ ...d, user: v }))
-                  }}
-                  placeholder="admin"
-                  required
-                />
-              </label>
-
-              <label className="flex flex-col gap-1.5 text-sm text-foreground">
-                Способ входа
-                <select
-                  className={fieldClass}
-                  value={draft.auth}
-                  onChange={(e) => {
-                    const v = e.currentTarget.value as AuthMethod
-                    setDraft((d) => ({ ...d, auth: v }))
-                  }}
-                >
-                  {(Object.keys(authLabels) as AuthMethod[]).map((a) => (
-                    <option key={a} value={a}>
-                      {authLabels[a]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <p className="-mt-2.5 text-xs text-muted-foreground">
-                Ключ по умолчанию берется из ssh-agent/~/.ssh. Пароль — только если ключа нет.
-              </p>
-
-              {draft.auth === 'keyFile' && (
-                <label className="flex flex-col gap-1.5 text-sm text-foreground">
-                  Путь к файлу ключа
-                  <input
-                    className={fieldClass}
-                    value={draft.keyPath ?? ''}
-                    onChange={(e) => {
-                      const v = e.currentTarget.value
-                      setDraft((d) => ({ ...d, keyPath: v || null }))
-                    }}
-                    placeholder="~/.ssh/id_ed25519"
-                  />
-                </label>
-              )}
-            </>
-          )}
-
-          <label className="flex flex-col gap-1.5 text-sm text-foreground">
-            Порт панели
-            <input
-              type="number"
-              className={fieldClass}
-              value={draft.panelPort}
-              onChange={(e) => {
-                const v = Number(e.currentTarget.value)
-                setDraft((d) => ({ ...d, panelPort: v }))
-              }}
-            />
-          </label>
-
-          {/* Fluent: form action row lives at the bottom-right, primary
-              action ("Сохранить") rightmost, secondary ("Отмена") to its left. */}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setFormOpen(false)
-                setDraft(emptyDraft())
+        <Card className="gap-4 py-5">
+          <CardContent className="flex flex-col gap-4 px-5">
+            <form
+              className="flex flex-col gap-4"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void saveDraft()
               }}
             >
-              Отмена
-            </Button>
-            <Button type="submit" variant="primary">
-              Сохранить
-            </Button>
-          </div>
-        </form>
+              <div className="flex gap-2">
+                {(['local', 'remote'] as const).map((m) => (
+                  <Button
+                    key={m}
+                    type="button"
+                    variant={draft.mode === m ? 'default' : 'outline'}
+                    className="flex-1"
+                    onClick={() =>
+                      setDraft((d) => ({
+                        ...d,
+                        mode: m,
+                        host: m === 'local' ? '127.0.0.1' : d.host === '127.0.0.1' ? '' : d.host,
+                      }))
+                    }
+                  >
+                    {modeLabels[m]}
+                  </Button>
+                ))}
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-name">Название</Label>
+                <Input
+                  id="profile-name"
+                  value={draft.name}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value
+                    setDraft((d) => ({ ...d, name: v }))
+                  }}
+                  placeholder="Мой сервер"
+                  required
+                />
+              </div>
+
+              {draft.mode === 'remote' && (
+                <>
+                  <div className="flex gap-3">
+                    <div className="flex flex-1 flex-col gap-1.5">
+                      <Label htmlFor="profile-host">Хост</Label>
+                      <Input
+                        id="profile-host"
+                        value={draft.host}
+                        onChange={(e) => {
+                          const v = e.currentTarget.value
+                          setDraft((d) => ({ ...d, host: v }))
+                        }}
+                        placeholder="example.com"
+                        required
+                      />
+                    </div>
+                    <div className="flex w-24 flex-col gap-1.5">
+                      <Label htmlFor="profile-port">SSH-порт</Label>
+                      <Input
+                        id="profile-port"
+                        type="number"
+                        value={draft.port}
+                        onChange={(e) => {
+                          const v = Number(e.currentTarget.value)
+                          setDraft((d) => ({ ...d, port: v }))
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="profile-user">Пользователь</Label>
+                    <Input
+                      id="profile-user"
+                      value={draft.user}
+                      onChange={(e) => {
+                        const v = e.currentTarget.value
+                        setDraft((d) => ({ ...d, user: v }))
+                      }}
+                      placeholder="admin"
+                      required
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="profile-auth">Способ входа</Label>
+                    <Select
+                      value={draft.auth}
+                      onValueChange={(v) => setDraft((d) => ({ ...d, auth: v as AuthMethod }))}
+                    >
+                      <SelectTrigger id="profile-auth" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(Object.keys(authLabels) as AuthMethod[]).map((a) => (
+                          <SelectItem key={a} value={a}>
+                            {authLabels[a]}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <p className="-mt-2.5 text-xs text-muted-foreground">
+                    Ключ по умолчанию берется из ssh-agent/~/.ssh. Пароль — только если ключа нет.
+                  </p>
+
+                  {draft.auth === 'keyFile' && (
+                    <div className="flex flex-col gap-1.5">
+                      <Label htmlFor="profile-key-path">Путь к файлу ключа</Label>
+                      <Input
+                        id="profile-key-path"
+                        value={draft.keyPath ?? ''}
+                        onChange={(e) => {
+                          const v = e.currentTarget.value
+                          setDraft((d) => ({ ...d, keyPath: v || null }))
+                        }}
+                        placeholder="~/.ssh/id_ed25519"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-panel-port">Порт панели</Label>
+                <Input
+                  id="profile-panel-port"
+                  type="number"
+                  value={draft.panelPort}
+                  onChange={(e) => {
+                    const v = Number(e.currentTarget.value)
+                    setDraft((d) => ({ ...d, panelPort: v }))
+                  }}
+                />
+              </div>
+
+              {/* Fluent: form action row lives at the bottom-right, primary
+                  action ("Сохранить") rightmost, secondary ("Отмена") to its left. */}
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setFormOpen(false)
+                    setDraft(emptyDraft())
+                  }}
+                >
+                  Отмена
+                </Button>
+                <Button type="submit" variant="default">
+                  Сохранить
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
       ) : (
         <Button
-          variant="secondary"
+          variant="outline"
           onClick={() => setFormOpen(true)}
-          className="self-start border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground"
+          className={cn('self-start border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground')}
         >
           + Добавить профиль
         </Button>

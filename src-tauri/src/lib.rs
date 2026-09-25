@@ -2,18 +2,15 @@ mod commands;
 mod connection;
 mod tunnel;
 
-// TODO (M1, final-review, accept-as-is until GUI-verified): `app.security.csp`
-// in `tauri.conf.json` is `null` (CSP disabled), so the panel iframe
-// (`Panel.tsx`, `http://127.0.0.1:<tunnel-or-panel-port>/_app/`) loads
-// unrestricted. A scoped policy — roughly `default-src 'self'; style-src
-// 'self'; img-src 'self' asset: https://asset.localhost; font-src 'self';
-// connect-src ipc: http://ipc.localhost; frame-src http://127.0.0.1:*` — is
-// a hardening follow-up, but it must also satisfy Tauri's own IPC bootstrap
-// requirements for this webview (WebView2 on Windows / WebKitGTK on Linux
-// differ) without breaking the app shell or the iframe. This repo has no CI
-// and the GUI can't be exercised headlessly, so it was left as `null` here
-// rather than risk shipping an untested, possibly app-breaking CSP — verify
-// live (shell renders, iframe loads, no console CSP violations) first.
+// NOTE (was M1 TODO): the panel is no longer loaded in an `<iframe>` — the
+// daemon serves `Content-Security-Policy: frame-ancestors 'none'`
+// (anti-clickjacking), which blocks framing outright. The panel is now
+// loaded as the main window's TOP-LEVEL content instead (`commands::connect`
+// navigates the webview there directly; `frame-ancestors` does not apply to
+// top-level navigation). `app.security.csp` stays `null`: Tauri's CSP
+// applies to the app's OWN bundled pages, not to a page the webview has
+// navigated to externally, so it has no bearing on the panel's CSP either
+// way.
 
 #[cfg(desktop)]
 use tauri::{
@@ -71,6 +68,19 @@ pub fn run() {
                 let quit_i = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show_i, &disconnect_i, &quit_i])?;
 
+                // Capture the main window's entry URL (the React Connect
+                // screen: dev-server origin or the bundled
+                // tauri://localhost / http://tauri.localhost entry point,
+                // whichever this platform resolves to) *before* anything
+                // navigates it away, so `commands::disconnect` and the tray
+                // "Отключиться" handler below can navigate back to it
+                // without hardcoding a dev-vs-prod URL.
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(start_url) = window.url() {
+                        app.manage(commands::StartUrl(start_url));
+                    }
+                }
+
                 let icon = app
                     .default_window_icon()
                     .cloned()
@@ -85,12 +95,20 @@ pub fn run() {
                     .on_menu_event(|app, event| match event.id().as_ref() {
                         "show" => restore_main_window(app),
                         "disconnect" => {
+                            // Tray is Rust-side and independent of webview
+                            // content, so this works the same whether the
+                            // window is currently showing the app shell or
+                            // the remote panel.
                             let app_handle = app.clone();
                             tauri::async_runtime::spawn(async move {
                                 let state = app_handle.state::<tunnel::TunnelState>();
                                 let mut guard = state.0.lock().await;
                                 *guard = None; // Drop kills the ssh child, if any.
                                 drop(guard);
+                                if let Some(window) = app_handle.get_webview_window("main") {
+                                    let start_url = app_handle.state::<commands::StartUrl>();
+                                    let _ = window.navigate(start_url.0.clone());
+                                }
                                 let _ = app_handle.emit("voltadmin-disconnected", ());
                             });
                         }

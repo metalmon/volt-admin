@@ -6,11 +6,30 @@
 
 use crate::connection::{ConnMode, Profile};
 use crate::tunnel::{self, TunnelState};
-use tauri::{command, AppHandle, Runtime, State};
+use tauri::{command, AppHandle, Manager, Runtime, State};
 use tauri_plugin_store::StoreExt;
 
 const STORE_PATH: &str = "profiles.json";
 const PROFILES_KEY: &str = "profiles";
+
+/// The main window's URL at app startup (the React connect screen: the dev
+/// server origin or the bundled `tauri://localhost`/`http://tauri.localhost`
+/// entry point, whichever `tauri.conf.json` resolves to on this platform).
+/// Captured once in `lib.rs::run` before anything navigates the webview
+/// away, so `disconnect` can navigate back to it without hardcoding a
+/// dev-vs-prod URL here.
+pub struct StartUrl(pub tauri::Url);
+
+/// Navigate the main window's webview to `url`, top-level (not an iframe).
+/// The daemon panel serves `Content-Security-Policy: frame-ancestors
+/// 'none'`, which blocks framing but not top-level navigation — so this is
+/// how the connected panel is shown instead of an `<iframe>`.
+fn navigate_main_window<R: Runtime>(app: &AppHandle<R>, url: tauri::Url) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    window.navigate(url).map_err(|e| e.to_string())
+}
 
 fn load_profiles<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<Profile>, String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
@@ -54,17 +73,19 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     persist_profiles(&app, &profiles)
 }
 
-/// Connect to a profile's `voltd` runtime and return the local URL to load
-/// in the UI.
+/// Connect to a profile's `voltd` runtime, navigate the main window's
+/// webview top-level to the panel (see `navigate_main_window`), and return
+/// the panel's base URL.
 ///
-/// - `Local` mode never opens a tunnel: it returns the direct panel URL.
+/// - `Local` mode never opens a tunnel: it uses the direct panel URL.
 /// - `Remote` mode opens an SSH `-L` tunnel (tearing down any previously
-///   active tunnel first) and returns the tunnel's local URL.
+///   active tunnel first) and uses the tunnel's local URL.
 ///
 /// `password` is only used for `AuthMethod::Password` profiles and is
 /// never persisted — see `crate::tunnel`.
 #[command]
-pub async fn connect(
+pub async fn connect<R: Runtime>(
+    app: AppHandle<R>,
     profile: Profile,
     password: Option<String>,
     tunnel_state: State<'_, TunnelState>,
@@ -74,24 +95,40 @@ pub async fn connect(
     // dropping the old value (if any) kills its ssh child.
     *guard = None;
 
-    match profile.mode {
-        ConnMode::Local => Ok(format!("http://127.0.0.1:{}", profile.panel_port)),
+    let base_url = match profile.mode {
+        ConnMode::Local => format!("http://127.0.0.1:{}", profile.panel_port),
         ConnMode::Remote => {
             let tun = tunnel::open_tunnel(&profile, password.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
             let url = format!("http://127.0.0.1:{}", tun.local_port);
             *guard = Some(tun);
-            Ok(url)
+            url
         }
-    }
+    };
+    drop(guard);
+
+    let panel_url = format!("{}/_app/", base_url.trim_end_matches('/'));
+    let url = tauri::Url::parse(&panel_url).map_err(|e| e.to_string())?;
+    navigate_main_window(&app, url)?;
+
+    Ok(base_url)
 }
 
-/// Tear down the active tunnel (if any). No-op in `Local` mode or when
-/// nothing is connected.
+/// Tear down the active tunnel (if any) and navigate the main window's
+/// webview back to the app's own entry point (the Connect screen). No-op on
+/// the tunnel in `Local` mode or when nothing is connected — the navigate
+/// back still happens unconditionally, since the window may be showing the
+/// panel regardless of mode.
 #[command]
-pub async fn disconnect(tunnel_state: State<'_, TunnelState>) -> Result<(), String> {
+pub async fn disconnect<R: Runtime>(
+    app: AppHandle<R>,
+    tunnel_state: State<'_, TunnelState>,
+    start_url: State<'_, StartUrl>,
+) -> Result<(), String> {
     let mut guard = tunnel_state.0.lock().await;
     *guard = None; // Drop kills the ssh child.
-    Ok(())
+    drop(guard);
+
+    navigate_main_window(&app, start_url.0.clone())
 }

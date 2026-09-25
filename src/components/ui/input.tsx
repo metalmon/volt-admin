@@ -1,0 +1,64 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+// Copied verbatim from Thunderbolt (fork/dev:src/components/ui/input.tsx).
+
+import { cva, type VariantProps } from 'class-variance-authority'
+import { forwardRef, type InputHTMLAttributes } from 'react'
+
+import { cn } from '@/lib/utils'
+
+const inputVariants = cva(
+  // dark:bg-input (matching Textarea) — a translucent white fill that lifts
+  // the field one step off whatever dark surface it sits on (page, card,
+  // modal, panel); light mode stays transparent, its borders carry enough
+  // contrast.
+  'border-border file:text-foreground placeholder:text-muted-foreground selection:bg-primary selection:text-primary-foreground dark:bg-input flex min-w-0 rounded-lg border bg-transparent px-3 py-1 text-[length:var(--font-size-body)] outline-none file:inline-flex file:border-0 file:bg-transparent file:text-sm file:font-medium disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50',
+  {
+    variants: {
+      variant: {
+        default: 'focus-visible:border-border-strong',
+        filled: 'bg-muted/50 focus-visible:bg-transparent focus-visible:border-border-strong',
+        outline: 'border-2 focus-visible:border-border-strong',
+        ghost: 'border-none focus-visible:bg-accent/50',
+      },
+      inputSize: {
+        default: 'h-[var(--touch-height-default)] w-full',
+        sm: 'h-[var(--touch-height-sm)] w-full text-xs px-2 py-1 rounded-lg',
+        lg: 'h-[var(--touch-height-lg)] w-full text-base px-4 py-2 rounded-lg',
+        xl: 'h-[var(--touch-height-xl)] w-full text-lg px-6 py-1.5 rounded-lg',
+      },
+      state: {
+        default: '',
+        error: 'aria-invalid:border-destructive',
+        success: 'border-green-500 focus-visible:border-green-600',
+      },
+    },
+    defaultVariants: {
+      variant: 'default',
+      inputSize: 'default',
+      state: 'default',
+    },
+  },
+)
+
+export type InputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'size'> & VariantProps<typeof inputVariants>
+
+const Input = forwardRef<HTMLInputElement, InputProps>(
+  ({ className, type, variant, inputSize, state, ...props }, ref) => {
+    return (
+      <input
+        aria-invalid={state === 'error' ? 'true' : undefined}
+        type={type}
+        data-slot="input"
+        className={cn(inputVariants({ variant, inputSize, state, className }))}
+        ref={ref}
+        {...props}
+      />
+    )
+  },
+)
+Input.displayName = 'Input'
+
+export { Input, inputVariants }
