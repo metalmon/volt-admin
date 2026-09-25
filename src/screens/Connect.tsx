@@ -208,7 +208,10 @@ export default function Connect({ onConnected }: ConnectProps) {
                     type="password"
                     autoFocus
                     value={passwordValue}
-                    onChange={(e) => setPasswordValue(e.currentTarget.value)}
+                    onChange={(e) => {
+                      const v = e.currentTarget.value
+                      setPasswordValue(v)
+                    }}
                     placeholder="Пароль SSH"
                     className="flex-1 rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
                   />
@@ -273,7 +276,10 @@ export default function Connect({ onConnected }: ConnectProps) {
             <input
               className="rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
               value={draft.name}
-              onChange={(e) => setDraft((d) => ({ ...d, name: e.currentTarget.value }))}
+              onChange={(e) => {
+                const v = e.currentTarget.value
+                setDraft((d) => ({ ...d, name: v }))
+              }}
               placeholder="Мой сервер"
               required
             />
@@ -287,7 +293,10 @@ export default function Connect({ onConnected }: ConnectProps) {
                   <input
                     className="rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
                     value={draft.host}
-                    onChange={(e) => setDraft((d) => ({ ...d, host: e.currentTarget.value }))}
+                    onChange={(e) => {
+                      const v = e.currentTarget.value
+                      setDraft((d) => ({ ...d, host: v }))
+                    }}
                     placeholder="example.com"
                     required
                   />
@@ -298,7 +307,10 @@ export default function Connect({ onConnected }: ConnectProps) {
                     type="number"
                     className="rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
                     value={draft.port}
-                    onChange={(e) => setDraft((d) => ({ ...d, port: Number(e.currentTarget.value) }))}
+                    onChange={(e) => {
+                      const v = Number(e.currentTarget.value)
+                      setDraft((d) => ({ ...d, port: v }))
+                    }}
                   />
                 </label>
               </div>
@@ -308,7 +320,10 @@ export default function Connect({ onConnected }: ConnectProps) {
                 <input
                   className="rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
                   value={draft.user}
-                  onChange={(e) => setDraft((d) => ({ ...d, user: e.currentTarget.value }))}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value
+                    setDraft((d) => ({ ...d, user: v }))
+                  }}
                   placeholder="admin"
                   required
                 />
@@ -319,7 +334,10 @@ export default function Connect({ onConnected }: ConnectProps) {
                 <select
                   className="rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
                   value={draft.auth}
-                  onChange={(e) => setDraft((d) => ({ ...d, auth: e.currentTarget.value as AuthMethod }))}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value as AuthMethod
+                    setDraft((d) => ({ ...d, auth: v }))
+                  }}
                 >
                   {(Object.keys(authLabels) as AuthMethod[]).map((a) => (
                     <option key={a} value={a}>
@@ -335,7 +353,10 @@ export default function Connect({ onConnected }: ConnectProps) {
                   <input
                     className="rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
                     value={draft.keyPath ?? ''}
-                    onChange={(e) => setDraft((d) => ({ ...d, keyPath: e.currentTarget.value || null }))}
+                    onChange={(e) => {
+                      const v = e.currentTarget.value
+                      setDraft((d) => ({ ...d, keyPath: v || null }))
+                    }}
                     placeholder="~/.ssh/id_ed25519"
                   />
                 </label>
@@ -349,7 +370,10 @@ export default function Connect({ onConnected }: ConnectProps) {
               type="number"
               className="rounded-[var(--radius)] border border-input bg-background px-3 py-1.5 text-sm"
               value={draft.panelPort}
-              onChange={(e) => setDraft((d) => ({ ...d, panelPort: Number(e.currentTarget.value) }))}
+              onChange={(e) => {
+                const v = Number(e.currentTarget.value)
+                setDraft((d) => ({ ...d, panelPort: v }))
+              }}
             />
           </label>
 
