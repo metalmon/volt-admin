@@ -1,3 +1,6 @@
+mod commands;
+mod connection;
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -8,7 +11,13 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .plugin(tauri_plugin_store::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            commands::list_profiles,
+            commands::save_profile,
+            commands::delete_profile
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
