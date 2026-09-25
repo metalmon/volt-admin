@@ -34,6 +34,21 @@ fn restore_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// TEMP debug trace to a file (GUI apps on Windows have no attached
+/// stdout/stderr, so `eprintln!` is invisible there). Remove once the tray
+/// disconnect path is confirmed.
+#[cfg(desktop)]
+fn dbg_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("C:/dev/volt-admin/disconnect-debug.log")
+    {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -98,14 +113,16 @@ pub fn run() {
                     // Left-click restores the window (see below); the menu
                     // itself only opens on right-click.
                     .show_menu_on_left_click(false)
-                    .on_menu_event(|app, event| match event.id().as_ref() {
+                    .on_menu_event(|app, event| {
+                      dbg_log(&format!("menu event: id={}", event.id().as_ref()));
+                      match event.id().as_ref() {
                         "show" => restore_main_window(app),
                         "disconnect" => {
                             // Tray is Rust-side and independent of webview
                             // content, so this works the same whether the
                             // window is currently showing the app shell or
                             // the remote panel.
-                            eprintln!("[volt-admin] tray disconnect: clicked");
+                            dbg_log("disconnect: arm entered");
                             let app_handle = app.clone();
                             tauri::async_runtime::spawn(async move {
                                 {
@@ -113,7 +130,7 @@ pub fn run() {
                                     let mut guard = state.0.lock().await;
                                     *guard = None; // Drop kills the ssh child, if any.
                                 }
-                                eprintln!("[volt-admin] tray disconnect: tunnel cleared");
+                                dbg_log("disconnect: tunnel cleared");
                                 // Navigate on the UI thread: WebView2 requires
                                 // navigation to run on the main thread, and
                                 // this handler body runs on a spawned task.
@@ -123,16 +140,10 @@ pub fn run() {
                                         Some(window) => {
                                             let start_url = nav.state::<commands::StartUrl>();
                                             let url = start_url.0.clone();
-                                            eprintln!(
-                                                "[volt-admin] tray disconnect: navigating main -> {url}"
-                                            );
+                                            dbg_log(&format!("disconnect: navigating main -> {url}"));
                                             match window.navigate(url.clone()) {
-                                                Ok(()) => eprintln!(
-                                                    "[volt-admin] tray disconnect: navigate() Ok"
-                                                ),
-                                                Err(e) => eprintln!(
-                                                    "[volt-admin] tray disconnect: navigate() ERR: {e}"
-                                                ),
+                                                Ok(()) => dbg_log("disconnect: navigate() Ok"),
+                                                Err(e) => dbg_log(&format!("disconnect: navigate() ERR: {e}")),
                                             }
                                             // Fallback: drive the navigation from
                                             // the currently-loaded page itself
@@ -148,29 +159,22 @@ pub fn run() {
                                                 "window.location.replace({:?})",
                                                 url.as_str()
                                             )) {
-                                                Ok(()) => eprintln!(
-                                                    "[volt-admin] tray disconnect: eval() Ok"
-                                                ),
-                                                Err(e) => eprintln!(
-                                                    "[volt-admin] tray disconnect: eval() ERR: {e}"
-                                                ),
+                                                Ok(()) => dbg_log("disconnect: eval() Ok"),
+                                                Err(e) => dbg_log(&format!("disconnect: eval() ERR: {e}")),
                                             }
                                         }
-                                        None => eprintln!(
-                                            "[volt-admin] tray disconnect: main window NOT FOUND"
-                                        ),
+                                        None => dbg_log("disconnect: main window NOT FOUND"),
                                     }
                                 });
                                 if let Err(e) = res {
-                                    eprintln!(
-                                        "[volt-admin] tray disconnect: run_on_main_thread ERR: {e}"
-                                    );
+                                    dbg_log(&format!("disconnect: run_on_main_thread ERR: {e}"));
                                 }
                                 let _ = app_handle.emit("voltadmin-disconnected", ());
                             });
                         }
                         "quit" => app.exit(0),
                         _ => {}
+                      }
                     })
                     // THE bug fix: upstream only handled the menu, or toggled
                     // show/hide, so a minimized window never came back on
