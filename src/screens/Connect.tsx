@@ -74,6 +74,9 @@ export default function Connect() {
   const [connectingId, setConnectingId] = useState<string | null>(null)
   const [formOpen, setFormOpen] = useState(false)
   const [draft, setDraft] = useState<Draft>(emptyDraft())
+  // null → the form creates a new profile; a profile id → it edits that
+  // profile in place (save_profile upserts by id on the Rust side).
+  const [editingId, setEditingId] = useState<string | null>(null)
   // Password-auth profiles need a transient prompt at connect time — the
   // password itself is never persisted (see `Profile` above).
   const [passwordPromptId, setPasswordPromptId] = useState<string | null>(null)
@@ -95,16 +98,34 @@ export default function Connect() {
     void refresh()
   }, [])
 
+  const closeForm = () => {
+    setFormOpen(false)
+    setDraft(emptyDraft())
+    setEditingId(null)
+  }
+
+  const startCreate = () => {
+    setDraft(emptyDraft())
+    setEditingId(null)
+    setFormOpen(true)
+  }
+
+  const startEdit = (p: Profile) => {
+    const { id: _id, ...rest } = p
+    setDraft(rest)
+    setEditingId(p.id)
+    setFormOpen(true)
+  }
+
   const saveDraft = async () => {
     if (!draft.name.trim()) {
       setError('Введите название профиля')
       return
     }
-    const profile: Profile = { id: crypto.randomUUID(), ...draft }
+    const profile: Profile = { id: editingId ?? crypto.randomUUID(), ...draft }
     try {
       await invoke('save_profile', { profile })
-      setFormOpen(false)
-      setDraft(emptyDraft())
+      closeForm()
       await refresh()
     } catch (e) {
       setError(`Не удалось сохранить профиль: ${String(e)}`)
@@ -186,6 +207,9 @@ export default function Connect() {
                   {/* Fluent: secondary/dismissive action on the left, primary
                       (positive) action rightmost. */}
                   <div className="flex items-center gap-2">
+                    <Button variant="outline" onClick={() => startEdit(p)} disabled={connectingId !== null}>
+                      Изменить
+                    </Button>
                     <Button
                       variant="outline"
                       onClick={() => void deleteProfile(p.id)}
@@ -244,6 +268,9 @@ export default function Connect() {
       {formOpen ? (
         <Card className="gap-4 py-5">
           <CardContent className="flex flex-col gap-4 px-5">
+            <h2 className="font-heading text-lg text-foreground">
+              {editingId ? 'Изменить профиль' : 'Новый профиль'}
+            </h2>
             <form
               className="flex flex-col gap-4"
               onSubmit={(e) => {
@@ -384,14 +411,7 @@ export default function Connect() {
               {/* Fluent: form action row lives at the bottom-right, primary
                   action ("Сохранить") rightmost, secondary ("Отмена") to its left. */}
               <div className="flex justify-end gap-2 pt-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    setFormOpen(false)
-                    setDraft(emptyDraft())
-                  }}
-                >
+                <Button type="button" variant="outline" onClick={closeForm}>
                   Отмена
                 </Button>
                 <Button type="submit" variant="default">
@@ -404,7 +424,7 @@ export default function Connect() {
       ) : (
         <Button
           variant="outline"
-          onClick={() => setFormOpen(true)}
+          onClick={startCreate}
           className={cn('self-end border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground')}
         >
           + Добавить профиль
