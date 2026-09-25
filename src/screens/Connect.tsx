@@ -169,7 +169,7 @@ export default function Connect() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-xl flex-col gap-6 px-6 py-10">
+    <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-10">
       <header className="text-center">
         <h1 className="font-heading text-2xl text-foreground">Подключение</h1>
         <p className="text-sm text-muted-foreground">Выберите сохраненный профиль или добавьте новый.</p>
@@ -197,16 +197,16 @@ export default function Connect() {
             <li key={p.id}>
               <Card className="gap-3 py-4 transition-[box-shadow,border-color] duration-150 hover:border-brand/30 hover:shadow-sm">
                 <CardContent className="flex items-center justify-between gap-3 px-5">
-                  <div className="flex flex-col">
-                    <span className="font-medium text-card-foreground">{p.name}</span>
-                    <span className="text-xs text-muted-foreground">
+                  <div className="flex min-w-0 flex-col">
+                    <span className="truncate font-medium text-card-foreground">{p.name}</span>
+                    <span className="whitespace-nowrap text-xs text-muted-foreground">
                       {modeLabels[p.mode]}
                       {p.mode === 'remote' ? ` · ${p.user}@${p.host}:${p.port}` : ` · порт панели ${p.panelPort}`}
                     </span>
                   </div>
                   {/* Fluent: secondary/dismissive action on the left, primary
                       (positive) action rightmost. */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     <Button variant="outline" onClick={() => startEdit(p)} disabled={connectingId !== null}>
                       Изменить
                     </Button>

@@ -75,10 +75,16 @@ pub fn run() {
                 // navigates it away, so `commands::disconnect` and the tray
                 // "Отключиться" handler below can navigate back to it
                 // without hardcoding a dev-vs-prod URL.
+                // Manage StartUrl UNCONDITIONALLY: `disconnect` and the tray
+                // handler resolve it via `state::<StartUrl>()`, which panics
+                // if it was never managed — so a failed `window.url()` must
+                // still leave a usable fallback (the bundled app entry), or a
+                // disconnect would silently do nothing.
                 if let Some(window) = app.get_webview_window("main") {
-                    if let Ok(start_url) = window.url() {
-                        app.manage(commands::StartUrl(start_url));
-                    }
+                    let start_url = window
+                        .url()
+                        .unwrap_or_else(|_| "tauri://localhost/".parse().expect("valid fallback url"));
+                    app.manage(commands::StartUrl(start_url));
                 }
 
                 let icon = app
@@ -101,14 +107,21 @@ pub fn run() {
                             // the remote panel.
                             let app_handle = app.clone();
                             tauri::async_runtime::spawn(async move {
-                                let state = app_handle.state::<tunnel::TunnelState>();
-                                let mut guard = state.0.lock().await;
-                                *guard = None; // Drop kills the ssh child, if any.
-                                drop(guard);
-                                if let Some(window) = app_handle.get_webview_window("main") {
-                                    let start_url = app_handle.state::<commands::StartUrl>();
-                                    let _ = window.navigate(start_url.0.clone());
+                                {
+                                    let state = app_handle.state::<tunnel::TunnelState>();
+                                    let mut guard = state.0.lock().await;
+                                    *guard = None; // Drop kills the ssh child, if any.
                                 }
+                                // Navigate on the UI thread: WebView2 requires
+                                // navigation to run on the main thread, and
+                                // this handler body runs on a spawned task.
+                                let nav = app_handle.clone();
+                                let _ = app_handle.run_on_main_thread(move || {
+                                    if let Some(window) = nav.get_webview_window("main") {
+                                        let start_url = nav.state::<commands::StartUrl>();
+                                        let _ = window.navigate(start_url.0.clone());
+                                    }
+                                });
                                 let _ = app_handle.emit("voltadmin-disconnected", ());
                             });
                         }
