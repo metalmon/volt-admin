@@ -105,6 +105,7 @@ pub fn run() {
                             // content, so this works the same whether the
                             // window is currently showing the app shell or
                             // the remote panel.
+                            eprintln!("[volt-admin] tray disconnect: clicked");
                             let app_handle = app.clone();
                             tauri::async_runtime::spawn(async move {
                                 {
@@ -112,16 +113,59 @@ pub fn run() {
                                     let mut guard = state.0.lock().await;
                                     *guard = None; // Drop kills the ssh child, if any.
                                 }
+                                eprintln!("[volt-admin] tray disconnect: tunnel cleared");
                                 // Navigate on the UI thread: WebView2 requires
                                 // navigation to run on the main thread, and
                                 // this handler body runs on a spawned task.
                                 let nav = app_handle.clone();
-                                let _ = app_handle.run_on_main_thread(move || {
-                                    if let Some(window) = nav.get_webview_window("main") {
-                                        let start_url = nav.state::<commands::StartUrl>();
-                                        let _ = window.navigate(start_url.0.clone());
+                                let res = app_handle.run_on_main_thread(move || {
+                                    match nav.get_webview_window("main") {
+                                        Some(window) => {
+                                            let start_url = nav.state::<commands::StartUrl>();
+                                            let url = start_url.0.clone();
+                                            eprintln!(
+                                                "[volt-admin] tray disconnect: navigating main -> {url}"
+                                            );
+                                            match window.navigate(url.clone()) {
+                                                Ok(()) => eprintln!(
+                                                    "[volt-admin] tray disconnect: navigate() Ok"
+                                                ),
+                                                Err(e) => eprintln!(
+                                                    "[volt-admin] tray disconnect: navigate() ERR: {e}"
+                                                ),
+                                            }
+                                            // Fallback: drive the navigation from
+                                            // the currently-loaded page itself
+                                            // (a normal top-level location change
+                                            // the webview always allows), in case
+                                            // the Rust-side navigate() no-ops when
+                                            // returning from a remote origin.
+                                            // SAFE: `url` is our own StartUrl,
+                                            // captured at startup (never user or
+                                            // remote input) and `{:?}`-escaped —
+                                            // not an eval of untrusted content.
+                                            match window.eval(&format!(
+                                                "window.location.replace({:?})",
+                                                url.as_str()
+                                            )) {
+                                                Ok(()) => eprintln!(
+                                                    "[volt-admin] tray disconnect: eval() Ok"
+                                                ),
+                                                Err(e) => eprintln!(
+                                                    "[volt-admin] tray disconnect: eval() ERR: {e}"
+                                                ),
+                                            }
+                                        }
+                                        None => eprintln!(
+                                            "[volt-admin] tray disconnect: main window NOT FOUND"
+                                        ),
                                     }
                                 });
+                                if let Err(e) = res {
+                                    eprintln!(
+                                        "[volt-admin] tray disconnect: run_on_main_thread ERR: {e}"
+                                    );
+                                }
                                 let _ = app_handle.emit("voltadmin-disconnected", ());
                             });
                         }
