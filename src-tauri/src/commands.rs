@@ -4,8 +4,9 @@
 //! (`profiles.json`) under one key (`profiles`), as a plain array. No
 //! password is ever stored — see `crate::connection` for why.
 
-use crate::connection::Profile;
-use tauri::{command, AppHandle, Runtime};
+use crate::connection::{ConnMode, Profile};
+use crate::tunnel::{self, TunnelState};
+use tauri::{command, AppHandle, Runtime, State};
 use tauri_plugin_store::StoreExt;
 
 const STORE_PATH: &str = "profiles.json";
@@ -51,4 +52,46 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     let mut profiles = load_profiles(&app)?;
     profiles.retain(|p| p.id != id);
     persist_profiles(&app, &profiles)
+}
+
+/// Connect to a profile's `voltd` runtime and return the local URL to load
+/// in the UI.
+///
+/// - `Local` mode never opens a tunnel: it returns the direct panel URL.
+/// - `Remote` mode opens an SSH `-L` tunnel (tearing down any previously
+///   active tunnel first) and returns the tunnel's local URL.
+///
+/// `password` is only used for `AuthMethod::Password` profiles and is
+/// never persisted — see `crate::tunnel`.
+#[command]
+pub async fn connect(
+    profile: Profile,
+    password: Option<String>,
+    tunnel_state: State<'_, TunnelState>,
+) -> Result<String, String> {
+    let mut guard = tunnel_state.0.lock().await;
+    // A new connect attempt supersedes whatever was active before;
+    // dropping the old value (if any) kills its ssh child.
+    *guard = None;
+
+    match profile.mode {
+        ConnMode::Local => Ok(format!("http://127.0.0.1:{}", profile.panel_port)),
+        ConnMode::Remote => {
+            let tun = tunnel::open_tunnel(&profile, password.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            let url = format!("http://127.0.0.1:{}", tun.local_port);
+            *guard = Some(tun);
+            Ok(url)
+        }
+    }
+}
+
+/// Tear down the active tunnel (if any). No-op in `Local` mode or when
+/// nothing is connected.
+#[command]
+pub async fn disconnect(tunnel_state: State<'_, TunnelState>) -> Result<(), String> {
+    let mut guard = tunnel_state.0.lock().await;
+    *guard = None; // Drop kills the ssh child.
+    Ok(())
 }

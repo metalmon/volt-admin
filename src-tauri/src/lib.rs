@@ -1,5 +1,6 @@
 mod commands;
 mod connection;
+mod tunnel;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -12,11 +13,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .manage(tunnel::TunnelState::default())
         .invoke_handler(tauri::generate_handler![
             greet,
             commands::list_profiles,
             commands::save_profile,
-            commands::delete_profile
+            commands::delete_profile,
+            commands::connect,
+            commands::disconnect
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
