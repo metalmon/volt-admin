@@ -2,6 +2,19 @@ mod commands;
 mod connection;
 mod tunnel;
 
+// TODO (M1, final-review, accept-as-is until GUI-verified): `app.security.csp`
+// in `tauri.conf.json` is `null` (CSP disabled), so the panel iframe
+// (`Panel.tsx`, `http://127.0.0.1:<tunnel-or-panel-port>/_app/`) loads
+// unrestricted. A scoped policy — roughly `default-src 'self'; style-src
+// 'self'; img-src 'self' asset: https://asset.localhost; font-src 'self';
+// connect-src ipc: http://ipc.localhost; frame-src http://127.0.0.1:*` — is
+// a hardening follow-up, but it must also satisfy Tauri's own IPC bootstrap
+// requirements for this webview (WebView2 on Windows / WebKitGTK on Linux
+// differ) without breaking the app shell or the iframe. This repo has no CI
+// and the GUI can't be exercised headlessly, so it was left as `null` here
+// rather than risk shipping an untested, possibly app-breaking CSP — verify
+// live (shell renders, iframe loads, no console CSP violations) first.
+
 #[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
