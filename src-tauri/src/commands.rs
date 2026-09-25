@@ -12,13 +12,33 @@ use tauri_plugin_store::StoreExt;
 const STORE_PATH: &str = "profiles.json";
 const PROFILES_KEY: &str = "profiles";
 
-/// The main window's URL at app startup (the React connect screen: the dev
-/// server origin or the bundled `tauri://localhost`/`http://tauri.localhost`
-/// entry point, whichever `tauri.conf.json` resolves to on this platform).
-/// Captured once in `lib.rs::run` before anything navigates the webview
-/// away, so `disconnect` can navigate back to it without hardcoding a
-/// dev-vs-prod URL here.
-pub struct StartUrl(pub tauri::Url);
+/// The main window's app-entry URL (the React connect screen: the dev-server
+/// origin or the bundled `tauri://localhost`/`http://tauri.localhost` entry
+/// point, whichever `tauri.conf.json` resolves to on this platform), so
+/// `disconnect` can navigate back to it without hardcoding a dev-vs-prod URL.
+///
+/// Captured LAZILY on the first `connect` — NOT at `setup`, where the webview
+/// has not finished loading and `window.url()` still returns `about:blank`
+/// (capturing that made disconnect navigate to a blank page). At connect time
+/// the webview is showing the loaded Connect screen, so its URL is valid.
+#[derive(Default)]
+pub struct StartUrl(pub std::sync::Mutex<Option<tauri::Url>>);
+
+impl StartUrl {
+    /// Remember the app-entry URL the first time we see a real (non-blank)
+    /// one; later calls are ignored so a mid-session capture can't overwrite
+    /// it with the panel URL.
+    pub fn capture(&self, url: tauri::Url) {
+        let mut guard = self.0.lock().expect("StartUrl mutex poisoned");
+        if guard.is_none() && url.as_str() != "about:blank" {
+            *guard = Some(url);
+        }
+    }
+
+    pub fn get(&self) -> Option<tauri::Url> {
+        self.0.lock().expect("StartUrl mutex poisoned").clone()
+    }
+}
 
 /// Navigate the main window's webview to `url`, top-level (not an iframe).
 /// The daemon panel serves `Content-Security-Policy: frame-ancestors
@@ -108,6 +128,15 @@ pub async fn connect<R: Runtime>(
     };
     drop(guard);
 
+    // Capture the app-entry URL (the Connect screen the webview is currently
+    // showing) before we navigate away, so `disconnect` knows where to go
+    // back to. Lazy + once — see `StartUrl`.
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(current) = window.url() {
+            app.state::<StartUrl>().capture(current);
+        }
+    }
+
     // The panel entry point is the daemon's ROOT: its SPA fallback serves
     // index.html there, which itself pulls assets from `/_app/*`. `/_app/`
     // is only the static-asset prefix — requesting it bare returns 400 by
@@ -134,5 +163,9 @@ pub async fn disconnect<R: Runtime>(
     *guard = None; // Drop kills the ssh child.
     drop(guard);
 
-    navigate_main_window(&app, start_url.0.clone())
+    match start_url.get() {
+        Some(url) => navigate_main_window(&app, url),
+        // Never connected this session → nothing to navigate back to.
+        None => Ok(()),
+    }
 }

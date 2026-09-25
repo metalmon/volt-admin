@@ -34,21 +34,6 @@ fn restore_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// TEMP debug trace to a file (GUI apps on Windows have no attached
-/// stdout/stderr, so `eprintln!` is invisible there). Remove once the tray
-/// disconnect path is confirmed.
-#[cfg(desktop)]
-fn dbg_log(msg: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("C:/dev/volt-admin/disconnect-debug.log")
-    {
-        let _ = writeln!(f, "{msg}");
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -90,17 +75,10 @@ pub fn run() {
                 // navigates it away, so `commands::disconnect` and the tray
                 // "Отключиться" handler below can navigate back to it
                 // without hardcoding a dev-vs-prod URL.
-                // Manage StartUrl UNCONDITIONALLY: `disconnect` and the tray
-                // handler resolve it via `state::<StartUrl>()`, which panics
-                // if it was never managed — so a failed `window.url()` must
-                // still leave a usable fallback (the bundled app entry), or a
-                // disconnect would silently do nothing.
-                if let Some(window) = app.get_webview_window("main") {
-                    let start_url = window
-                        .url()
-                        .unwrap_or_else(|_| "tauri://localhost/".parse().expect("valid fallback url"));
-                    app.manage(commands::StartUrl(start_url));
-                }
+                // StartUrl is captured LAZILY on the first `connect` (the
+                // webview's URL here at setup is still `about:blank`), so just
+                // register the empty holder now.
+                app.manage(commands::StartUrl::default());
 
                 let icon = app
                     .default_window_icon()
@@ -113,16 +91,13 @@ pub fn run() {
                     // Left-click restores the window (see below); the menu
                     // itself only opens on right-click.
                     .show_menu_on_left_click(false)
-                    .on_menu_event(|app, event| {
-                      dbg_log(&format!("menu event: id={}", event.id().as_ref()));
-                      match event.id().as_ref() {
+                    .on_menu_event(|app, event| match event.id().as_ref() {
                         "show" => restore_main_window(app),
                         "disconnect" => {
                             // Tray is Rust-side and independent of webview
                             // content, so this works the same whether the
                             // window is currently showing the app shell or
                             // the remote panel.
-                            dbg_log("disconnect: arm entered");
                             let app_handle = app.clone();
                             tauri::async_runtime::spawn(async move {
                                 {
@@ -130,51 +105,24 @@ pub fn run() {
                                     let mut guard = state.0.lock().await;
                                     *guard = None; // Drop kills the ssh child, if any.
                                 }
-                                dbg_log("disconnect: tunnel cleared");
-                                // Navigate on the UI thread: WebView2 requires
-                                // navigation to run on the main thread, and
-                                // this handler body runs on a spawned task.
+                                // Navigate back to the captured app entry on
+                                // the UI thread (WebView2 requires navigation
+                                // to run there, and this body is a spawned
+                                // task). No-op if nothing was ever connected.
                                 let nav = app_handle.clone();
-                                let res = app_handle.run_on_main_thread(move || {
-                                    match nav.get_webview_window("main") {
-                                        Some(window) => {
-                                            let start_url = nav.state::<commands::StartUrl>();
-                                            let url = start_url.0.clone();
-                                            dbg_log(&format!("disconnect: navigating main -> {url}"));
-                                            match window.navigate(url.clone()) {
-                                                Ok(()) => dbg_log("disconnect: navigate() Ok"),
-                                                Err(e) => dbg_log(&format!("disconnect: navigate() ERR: {e}")),
-                                            }
-                                            // Fallback: drive the navigation from
-                                            // the currently-loaded page itself
-                                            // (a normal top-level location change
-                                            // the webview always allows), in case
-                                            // the Rust-side navigate() no-ops when
-                                            // returning from a remote origin.
-                                            // SAFE: `url` is our own StartUrl,
-                                            // captured at startup (never user or
-                                            // remote input) and `{:?}`-escaped —
-                                            // not an eval of untrusted content.
-                                            match window.eval(&format!(
-                                                "window.location.replace({:?})",
-                                                url.as_str()
-                                            )) {
-                                                Ok(()) => dbg_log("disconnect: eval() Ok"),
-                                                Err(e) => dbg_log(&format!("disconnect: eval() ERR: {e}")),
-                                            }
-                                        }
-                                        None => dbg_log("disconnect: main window NOT FOUND"),
+                                let _ = app_handle.run_on_main_thread(move || {
+                                    if let (Some(window), Some(url)) = (
+                                        nav.get_webview_window("main"),
+                                        nav.state::<commands::StartUrl>().get(),
+                                    ) {
+                                        let _ = window.navigate(url);
                                     }
                                 });
-                                if let Err(e) = res {
-                                    dbg_log(&format!("disconnect: run_on_main_thread ERR: {e}"));
-                                }
                                 let _ = app_handle.emit("voltadmin-disconnected", ());
                             });
                         }
                         "quit" => app.exit(0),
                         _ => {}
-                      }
                     })
                     // THE bug fix: upstream only handled the menu, or toggled
                     // show/hide, so a minimized window never came back on
