@@ -108,7 +108,11 @@ pub async fn connect<R: Runtime>(
     };
     drop(guard);
 
-    let panel_url = format!("{}/_app/", base_url.trim_end_matches('/'));
+    // The panel entry point is the daemon's ROOT: its SPA fallback serves
+    // index.html there, which itself pulls assets from `/_app/*`. `/_app/`
+    // is only the static-asset prefix — requesting it bare returns 400 by
+    // design (see the gateway's static_files handler), so navigate to `/`.
+    let panel_url = format!("{}/", base_url.trim_end_matches('/'));
     let url = tauri::Url::parse(&panel_url).map_err(|e| e.to_string())?;
     navigate_main_window(&app, url)?;
 

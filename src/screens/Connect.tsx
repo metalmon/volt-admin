@@ -405,7 +405,7 @@ export default function Connect() {
         <Button
           variant="outline"
           onClick={() => setFormOpen(true)}
-          className={cn('self-start border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground')}
+          className={cn('self-end border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground')}
         >
           + Добавить профиль
         </Button>
