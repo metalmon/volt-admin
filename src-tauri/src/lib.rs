@@ -36,17 +36,10 @@ fn restore_main_window(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default();
-
-    // Single-instance must be registered before other plugins (see plugin
-    // docs). A second launch focuses the existing window instead of opening
-    // a new process.
-    #[cfg(desktop)]
-    {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            restore_main_window(app);
-        }));
-    }
+    // Multi-copy model: no single-instance lock — launching the app again
+    // opens another independent copy (another connection). See
+    // _local/plan-volt-admin-multiwindow.md.
+    let builder = tauri::Builder::default();
 
     builder
         .plugin(tauri_plugin_opener::init())
