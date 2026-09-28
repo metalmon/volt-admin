@@ -115,15 +115,20 @@ pub async fn connect<R: Runtime>(
     // dropping the old value (if any) kills its ssh child.
     *guard = None;
 
-    let base_url = match profile.mode {
-        ConnMode::Local => format!("http://127.0.0.1:{}", profile.panel_port),
+    // `host_display` feeds the OS window title so the copy shows which
+    // instance it is connected to (Local = "локально", Remote = the host).
+    let (base_url, host_display) = match profile.mode {
+        ConnMode::Local => (
+            format!("http://127.0.0.1:{}", profile.panel_port),
+            "локально".to_string(),
+        ),
         ConnMode::Remote => {
             let tun = tunnel::open_tunnel(&profile, password.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
             let url = format!("http://127.0.0.1:{}", tun.local_port);
             *guard = Some(tun);
-            url
+            (url, profile.host.clone())
         }
     };
     drop(guard);
@@ -145,6 +150,11 @@ pub async fn connect<R: Runtime>(
     let url = tauri::Url::parse(&panel_url).map_err(|e| e.to_string())?;
     navigate_main_window(&app, url)?;
 
+    // Connection identity in the OS title bar (per copy/window).
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title(&format!("{} ({}) — Волт Админ", profile.name, host_display));
+    }
+
     Ok(base_url)
 }
 
@@ -162,6 +172,11 @@ pub async fn disconnect<R: Runtime>(
     let mut guard = tunnel_state.0.lock().await;
     *guard = None; // Drop kills the ssh child.
     drop(guard);
+
+    // Back to the launcher identity in the title bar.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title("Волт Админ");
+    }
 
     match start_url.get() {
         Some(url) => navigate_main_window(&app, url),
