@@ -115,12 +115,13 @@ pub async fn connect<R: Runtime>(
     // dropping the old value (if any) kills its ssh child.
     *guard = None;
 
-    // `host_display` feeds the OS window title so the copy shows which
-    // instance it is connected to (Local = "локально", Remote = the host).
-    let (base_url, host_display) = match profile.mode {
+    // `endpoint` (IP:port) feeds the OS window title so the copy shows which
+    // instance it is connected to. Local = the direct 127.0.0.1:panel_port;
+    // Remote = the actual remote host:panel_port (not the local tunnel port).
+    let (base_url, endpoint) = match profile.mode {
         ConnMode::Local => (
             format!("http://127.0.0.1:{}", profile.panel_port),
-            "локально".to_string(),
+            format!("127.0.0.1:{}", profile.panel_port),
         ),
         ConnMode::Remote => {
             let tun = tunnel::open_tunnel(&profile, password.as_deref())
@@ -128,7 +129,7 @@ pub async fn connect<R: Runtime>(
                 .map_err(|e| e.to_string())?;
             let url = format!("http://127.0.0.1:{}", tun.local_port);
             *guard = Some(tun);
-            (url, profile.host.clone())
+            (url, format!("{}:{}", profile.host, profile.panel_port))
         }
     };
     drop(guard);
@@ -152,7 +153,7 @@ pub async fn connect<R: Runtime>(
 
     // Connection identity in the OS title bar (per copy/window).
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title(&format!("{} ({}) — Волт Админ", profile.name, host_display));
+        let _ = window.set_title(&format!("{} ({}) — Volt Admin", profile.name, endpoint));
     }
 
     Ok(base_url)
@@ -175,7 +176,7 @@ pub async fn disconnect<R: Runtime>(
 
     // Back to the launcher identity in the title bar.
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title("Волт Админ");
+        let _ = window.set_title("Volt Admin");
     }
 
     match start_url.get() {
