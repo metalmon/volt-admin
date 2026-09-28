@@ -42,6 +42,12 @@ pub fn run() {
                 // `disconnect` command can navigate back to the launcher
                 // (captured lazily on the first connect — see commands::StartUrl).
                 app.manage(commands::StartUrl::default());
+
+                // Launcher identity in the title bar (RU brand «Вольт Админ»),
+                // overriding the conf default so it matches the connected title.
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_title("Вольт Админ");
+                }
             }
             Ok(())
         })

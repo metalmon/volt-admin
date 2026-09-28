@@ -153,7 +153,7 @@ pub async fn connect<R: Runtime>(
 
     // Connection identity in the OS title bar (per copy/window).
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title(&format!("{} ({}) — Volt Admin", profile.name, endpoint));
+        let _ = window.set_title(&format!("{} ({}) — Вольт Админ", profile.name, endpoint));
     }
 
     Ok(base_url)
@@ -176,7 +176,7 @@ pub async fn disconnect<R: Runtime>(
 
     // Back to the launcher identity in the title bar.
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title("Volt Admin");
+        let _ = window.set_title("Вольт Админ");
     }
 
     match start_url.get() {
