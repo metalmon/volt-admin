@@ -1,6 +1,7 @@
 mod commands;
 mod connection;
 mod tunnel;
+mod tunnel_embedded;
 
 // NOTE (was M1 TODO): the panel is no longer loaded in an `<iframe>` — the
 // daemon serves `Content-Security-Policy: frame-ancestors 'none'`

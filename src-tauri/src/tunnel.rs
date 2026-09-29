@@ -57,6 +57,10 @@ pub enum TunnelError {
     /// OpenSSH optional feature, say) needs an actionable message rather than
     /// an opaque "No such file or directory".
     SshNotFound,
+    /// The embedded (`russh`) fallback client failed. Carries an
+    /// already-actionable message describing what went wrong (connect,
+    /// handshake, auth, or forwarding).
+    Embedded(String),
 }
 
 impl std::fmt::Display for TunnelError {
@@ -85,6 +89,9 @@ impl std::fmt::Display for TunnelError {
             }
             TunnelError::SshNotFound => {
                 write!(f, "{}", SSH_NOT_FOUND_HINT)
+            }
+            TunnelError::Embedded(detail) => {
+                write!(f, "built-in SSH client: {detail}")
             }
         }
     }
@@ -165,11 +172,16 @@ pub struct Tunnel {
     child: Option<Child>,
     pub local_port: u16,
     askpass_path: Option<PathBuf>,
+    /// Set instead of `child` when the embedded (`russh`) fallback is used;
+    /// aborting it tears the forwarding down. Exactly one of `child` /
+    /// `embedded` is populated.
+    embedded: Option<crate::tunnel_embedded::EmbeddedTunnel>,
 }
 
 impl Tunnel {
-    /// Explicitly tear down the tunnel: kill the `ssh` child and remove the
-    /// askpass helper, if any. Safe to call more than once.
+    /// Explicitly tear down the tunnel: kill the `ssh` child (system path) or
+    /// abort the embedded forwarder, and remove the askpass helper, if any.
+    /// Safe to call more than once.
     pub fn close(&mut self) {
         if let Some(mut child) = self.child.take() {
             // Best-effort: the child may have already exited on its own.
@@ -177,6 +189,9 @@ impl Tunnel {
         }
         if let Some(path) = self.askpass_path.take() {
             let _ = std::fs::remove_file(path);
+        }
+        if let Some(mut embedded) = self.embedded.take() {
+            embedded.close();
         }
     }
 }
@@ -201,6 +216,13 @@ pub struct TunnelState(pub Mutex<Option<Tunnel>>);
 /// is never written to disk — it is passed to the `ssh` child only via a
 /// process-local environment variable read by a per-tunnel askpass helper.
 pub async fn open_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, TunnelError> {
+    // Opt-in / test override: use the built-in client outright, bypassing the
+    // system `ssh` probe (lets the embedded path be exercised on a machine that
+    // does have OpenSSH).
+    if force_embedded() {
+        return open_embedded_as_tunnel(p, password).await;
+    }
+
     let local_port = pick_free_port()?;
     let args = build_ssh_args(p, local_port);
 
@@ -234,6 +256,11 @@ pub async fn open_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, 
             if let Some(path) = askpass_path {
                 let _ = std::fs::remove_file(path);
             }
+            // No system `ssh`? Fall back to the built-in client so an
+            // unprepared machine can still connect.
+            if e.kind() == io::ErrorKind::NotFound {
+                return open_embedded_as_tunnel(p, password).await;
+            }
             return Err(map_spawn_error(e));
         }
     };
@@ -251,6 +278,28 @@ pub async fn open_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, 
         child: Some(child),
         local_port,
         askpass_path,
+        embedded: None,
+    })
+}
+
+/// Whether to force the embedded (`russh`) client instead of the system `ssh`.
+/// Set `VOLT_FORCE_EMBEDDED_SSH=1` (or `true`) to opt in — used for testing and
+/// as a manual override on machines where the system `ssh` misbehaves.
+fn force_embedded() -> bool {
+    std::env::var("VOLT_FORCE_EMBEDDED_SSH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Open a tunnel via the embedded client and wrap it as a `Tunnel` (so callers
+/// treat system- and embedded-backed tunnels identically).
+async fn open_embedded_as_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, TunnelError> {
+    let embedded = crate::tunnel_embedded::open_embedded_tunnel(p, password).await?;
+    Ok(Tunnel {
+        child: None,
+        local_port: embedded.local_port,
+        askpass_path: None,
+        embedded: Some(embedded),
     })
 }
 
