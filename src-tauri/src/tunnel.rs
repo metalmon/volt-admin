@@ -52,6 +52,11 @@ pub enum TunnelError {
     ProcessExited(std::process::ExitStatus, String),
     /// `AuthMethod::Password` was requested but no password was supplied.
     MissingPassword,
+    /// The `ssh` client binary was not found on PATH. Remote mode drives the
+    /// system `ssh`, so an unprepared machine (a stripped Windows without the
+    /// OpenSSH optional feature, say) needs an actionable message rather than
+    /// an opaque "No such file or directory".
+    SshNotFound,
 }
 
 impl std::fmt::Display for TunnelError {
@@ -78,7 +83,27 @@ impl std::fmt::Display for TunnelError {
             TunnelError::MissingPassword => {
                 write!(f, "password auth selected but no password was supplied")
             }
+            TunnelError::SshNotFound => {
+                write!(f, "{}", SSH_NOT_FOUND_HINT)
+            }
         }
+    }
+}
+
+/// Actionable message when the `ssh` client is missing. Tailored per-OS so
+/// an unprepared user is told exactly how to get OpenSSH.
+#[cfg(windows)]
+const SSH_NOT_FOUND_HINT: &str = "OpenSSH client not found. Install it via Settings > Apps > Optional Features > \"OpenSSH Client\", then reconnect (or make sure ssh.exe is on PATH).";
+#[cfg(not(windows))]
+const SSH_NOT_FOUND_HINT: &str = "OpenSSH client not found. Install openssh-client (Debian/Astra: `apt install openssh-client`; RED OS/Fedora: `dnf install openssh-clients`; macOS ships it), then reconnect.";
+
+/// Map an `ssh` spawn failure to a tunnel error: a missing binary becomes the
+/// actionable `SshNotFound`, everything else stays a raw I/O error.
+fn map_spawn_error(e: io::Error) -> TunnelError {
+    if e.kind() == io::ErrorKind::NotFound {
+        TunnelError::SshNotFound
+    } else {
+        TunnelError::Io(e)
     }
 }
 
@@ -201,7 +226,17 @@ pub async fn open_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, 
         askpass_path = Some(script);
     }
 
-    let mut child = cmd.spawn()?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            // Spawn failed (commonly: no `ssh` on PATH). Drop the askpass
+            // helper we may have written before returning.
+            if let Some(path) = askpass_path {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(map_spawn_error(e));
+        }
+    };
     let stderr_buf = child.stderr.take().map(spawn_stderr_reader);
 
     if let Err(e) = wait_for_forward(local_port, &mut child, stderr_buf.as_ref()).await {
@@ -209,7 +244,7 @@ pub async fn open_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, 
         if let Some(path) = askpass_path {
             let _ = std::fs::remove_file(path);
         }
-        return Err(annotate_windows_password_hint(e, p));
+        return Err(annotate_error_hint(e, p));
     }
 
     Ok(Tunnel {
@@ -293,24 +328,67 @@ async fn stderr_snapshot(buf: Option<&StderrBuf>) -> String {
     }
 }
 
-/// On Windows, `AuthMethod::Password` relies on `SSH_ASKPASS`, which
-/// Win32-OpenSSH has historically not honored — the child can sit waiting
-/// on a console prompt it never gets forever, surfacing as a plain
-/// `Timeout`. Make that failure mode actionable instead of mysterious.
-///
-/// NOTE: this path needs live verification against a real Windows OpenSSH
-/// client; Key/Agent auth are unaffected and not touched here.
+/// A private key file whose permissions are too open. Both Win32-OpenSSH
+/// ("UNPROTECTED PRIVATE KEY FILE" / "bad permissions") and Unix ssh reject
+/// such a key, auth fails, and ssh exits — a confusing failure unless the
+/// user is told to lock the file down.
+const KEY_PERMS_HINT: &str = "the private key file's permissions are too open, so ssh refused it — restrict it to your account (Windows: `icacls \"<key>\" /inheritance:r /grant:r \"%USERNAME%:R\"`; Unix: `chmod 600 <key>`)";
+
+/// On Windows, `AuthMethod::Password` feeds the password through
+/// `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force`. Modern Win32-OpenSSH (9.x,
+/// shipped with current Windows 10/11) honors this and password auth works
+/// — verified live against OpenSSH_for_Windows_9.5p2. Only a *legacy*
+/// Win32-OpenSSH build ignores `SSH_ASKPASS`, in which case the child can
+/// hang on a console prompt it never gets and surface as a bare `Timeout`.
+/// This hint is the fallback for that old-client case only.
+#[cfg(windows)]
+const WIN_PW_HINT: &str = "the SSH tunnel did not come up. If your Windows OpenSSH client is an older build it may not honor SSH_ASKPASS for password auth — update it (winget install Microsoft.OpenSSH.Beta) or use Key or Agent auth instead";
+
+/// Turn a raw tunnel failure into an actionable one when ssh's stderr (or
+/// the auth/OS combination) points at a known, fixable cause. Key and Agent
+/// auth benefit from the key-permissions hint; the legacy-Windows password
+/// hint applies only under `AuthMethod::Password` on Windows.
+fn annotate_error_hint(e: TunnelError, p: &Profile) -> TunnelError {
+    if p.auth == AuthMethod::KeyFile {
+        let detail = match &e {
+            TunnelError::Timeout(d) | TunnelError::ProcessExited(_, d) => d.as_str(),
+            _ => "",
+        };
+        let low = detail.to_ascii_lowercase();
+        if low.contains("bad permissions") || low.contains("unprotected private key") {
+            return append_hint(e, KEY_PERMS_HINT);
+        }
+    }
+    annotate_windows_password_hint(e, p)
+}
+
+/// Append an actionable `hint` to the free-text detail of a `Timeout` /
+/// `ProcessExited` error, preserving the original detail (and the exit
+/// status) so the underlying cause stays visible alongside the fix.
+fn append_hint(e: TunnelError, hint: &str) -> TunnelError {
+    match e {
+        TunnelError::Timeout(d) if d.is_empty() => TunnelError::Timeout(hint.to_string()),
+        TunnelError::Timeout(d) => TunnelError::Timeout(format!("{d} ({hint})")),
+        TunnelError::ProcessExited(s, d) if d.is_empty() => {
+            TunnelError::ProcessExited(s, hint.to_string())
+        }
+        TunnelError::ProcessExited(s, d) => {
+            TunnelError::ProcessExited(s, format!("{d} ({hint})"))
+        }
+        other => other,
+    }
+}
+
 #[cfg(windows)]
 fn annotate_windows_password_hint(e: TunnelError, p: &Profile) -> TunnelError {
     if p.auth != AuthMethod::Password {
         return e;
     }
-    const HINT: &str = "password auth may not work from a Windows client (Win32-OpenSSH does not reliably support SSH_ASKPASS) — try Key or Agent auth instead";
     match e {
         TunnelError::Timeout(detail) if detail.is_empty() => {
-            TunnelError::Timeout(HINT.to_string())
+            TunnelError::Timeout(WIN_PW_HINT.to_string())
         }
-        TunnelError::Timeout(detail) => TunnelError::Timeout(format!("{detail} ({HINT})")),
+        TunnelError::Timeout(detail) => TunnelError::Timeout(format!("{detail} ({WIN_PW_HINT})")),
         other => other,
     }
 }
@@ -336,13 +414,13 @@ fn write_askpass_script(local_port: u16) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-// NOTE: Win32-OpenSSH has historically not honored SSH_ASKPASS at all (it
-// prefers its own console/UI prompt when a tty is available), so the
-// password-auth path on a Windows client needs live verification — it may
-// simply never invoke this script. See `annotate_windows_password_hint`
-// for the user-facing fallback if the tunnel times out under
-// `AuthMethod::Password` on Windows. Key and Agent auth do not go through
-// this helper and are unaffected.
+// Modern Win32-OpenSSH (9.x, shipped with current Windows 10/11) honors
+// SSH_ASKPASS together with SSH_ASKPASS_REQUIRE=force, so this helper is
+// invoked and password auth works — verified live against
+// OpenSSH_for_Windows_9.5p2 (password accepted, tunnel came up). A *legacy*
+// Win32-OpenSSH build may ignore SSH_ASKPASS; `annotate_windows_password_hint`
+// provides the user-facing fallback for that case. Key and Agent auth do not
+// go through this helper and are unaffected.
 #[cfg(windows)]
 fn write_askpass_script(local_port: u16) -> io::Result<PathBuf> {
     let path =
@@ -428,5 +506,52 @@ mod tests {
         };
         let a = build_ssh_args(&p, 8081);
         assert!(!a.iter().any(|s| s == "-i"));
+    }
+
+    #[test]
+    fn missing_ssh_binary_maps_to_actionable_error() {
+        // A spawn that fails because `ssh` isn't on PATH surfaces as an
+        // actionable "install OpenSSH" error, not an opaque I/O error — this
+        // is the pre-flight guard for unprepared machines.
+        let e = map_spawn_error(io::Error::new(io::ErrorKind::NotFound, "not found"));
+        assert!(matches!(e, TunnelError::SshNotFound));
+        assert!(TunnelError::SshNotFound
+            .to_string()
+            .to_lowercase()
+            .contains("openssh"));
+    }
+
+    #[test]
+    fn other_spawn_errors_stay_io() {
+        let e = map_spawn_error(io::Error::new(io::ErrorKind::PermissionDenied, "nope"));
+        assert!(matches!(e, TunnelError::Io(_)));
+    }
+
+    #[test]
+    fn keyfile_bad_permissions_gets_actionable_hint() {
+        // Win32-OpenSSH and Unix ssh both refuse a private key whose file
+        // permissions are too open; the raw failure ("bad permissions") is
+        // turned into one that tells the user how to lock the key down.
+        let p = Profile {
+            auth: AuthMethod::KeyFile,
+            key_path: Some("/k".into()),
+            ..test_profile()
+        };
+        let raw = TunnelError::Timeout("Load key \"/k\": bad permissions".to_string());
+        let msg = annotate_error_hint(raw, &p).to_string().to_lowercase();
+        assert!(msg.contains("permission"));
+        assert!(msg.contains("icacls") || msg.contains("chmod"));
+    }
+
+    #[test]
+    fn non_keyfile_auth_not_annotated_for_key_perms() {
+        let p = Profile {
+            auth: AuthMethod::Agent,
+            ..test_profile()
+        };
+        let raw = TunnelError::Timeout("some unrelated failure".to_string());
+        let annotated = annotate_error_hint(raw, &p).to_string();
+        assert!(annotated.contains("some unrelated failure"));
+        assert!(!annotated.to_lowercase().contains("icacls"));
     }
 }
