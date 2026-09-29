@@ -1,101 +1,103 @@
 <div align="center">
 
-<img src="src/assets/logo.svg" alt="Вольт Админ" width="96" height="96">
+<img src="src/assets/logo.svg" alt="Volt Admin" width="96" height="96">
 
-# Вольт Админ
+# Volt Admin
 
-**Десктопное приложение для управления панелью Вольт — локально или удалённо по SSH.**
+**Desktop client for managing the Volt panel — locally or remotely over SSH.**
 
-[![Сборка](https://github.com/metalmon/volt-admin/actions/workflows/build-all.yml/badge.svg)](https://github.com/metalmon/volt-admin/actions/workflows/build-all.yml)
-![Платформы](https://img.shields.io/badge/платформы-Windows%20%7C%20Linux%20%7C%20macOS-2b2b2b)
+[![Build](https://github.com/metalmon/volt-admin/actions/workflows/build-all.yml/badge.svg)](https://github.com/metalmon/volt-admin/actions/workflows/build-all.yml)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-2b2b2b)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)
 
 </div>
 
 ---
 
-Вольт Админ — тонкий десктопный клиент к административной панели Вольт (демон
-ZeroClaw). Он открывает панель как нативное окно и добавляет то, чего у панели
-в браузере нет: сохранённые профили подключений, безопасный доступ к удалённому
-демону через SSH-туннель и запуск нескольких независимых копий сразу.
+Volt Admin is a thin desktop client for the Volt admin panel (the ZeroClaw
+daemon). It opens the panel as a native window and adds what the browser panel
+lacks: saved connection profiles, secure access to a remote daemon through an
+SSH tunnel, and running several independent copies at once.
 
-## Возможности
+## Features
 
-- **Профили подключений.** Сохраняйте локальные и удалённые подключения; список
-  хранится локально и переживает перезапуск.
-- **Локальный режим.** Мгновенное подключение к демону на этой же машине
-  (`http://127.0.0.1:<порт панели>`).
-- **Удалённый режим по SSH.** Доступ к панели удалённого демона через
-  зашифрованный SSH-туннель. Панель слушает только петлю сервера и **никогда**
-  не выставляется в сеть — туннель пробрасывает её к вам напрямую.
-- **Встроенный SSH — не нужен установленный OpenSSH.** По умолчанию используется
-  системный `ssh`; если его нет (например, «голая» Windows), приложение
-  автоматически переключается на **встроенный SSH-клиент**, вкомпилированный в
-  бинарь. Неподготовленной машине ничего доставлять не нужно.
-- **Три способа входа:** ключ (по умолчанию — из `ssh-agent` / `~/.ssh`), файл
-  ключа, пароль. **Пароль не сохраняется** — он запрашивается в момент
-  подключения и живёт только в памяти процесса.
-- **Много копий.** Запускайте несколько окон одновременно — каждое со своим
-  подключением; блокировки единственного экземпляра нет.
-- **Кросс-платформенность.** Установщики для Windows (NSIS `.exe` + `.msi`),
-  Linux (`.deb` + `.rpm`) и macOS (универсальный `.dmg`, arm64 + x86_64).
+- **Connection profiles.** Save local and remote connections; the list is
+  stored locally and survives restarts.
+- **Local mode.** Instant connection to a daemon on the same machine
+  (`http://127.0.0.1:<panel port>`).
+- **Remote mode over SSH.** Reach a remote daemon's panel through an encrypted
+  SSH tunnel. The panel listens only on the server's loopback and is **never**
+  exposed to the network — the tunnel forwards it straight to you.
+- **Built-in SSH — no OpenSSH required.** The system `ssh` client is used by
+  default; if it is missing (a bare Windows install, say), the app
+  automatically falls back to a **built-in SSH client** compiled into the
+  binary. An unprepared machine needs nothing installed.
+- **Three sign-in methods:** key (default — from `ssh-agent` / `~/.ssh`), key
+  file, or password. **Passwords are never stored** — they are requested at
+  connect time and live only in process memory.
+- **Multiple copies.** Launch several windows at once — each with its own
+  connection; there is no single-instance lock.
+- **Cross-platform.** Installers for Windows (NSIS `.exe` + `.msi`), Linux
+  (`.deb` + `.rpm`), and macOS (universal `.dmg`, arm64 + x86_64).
 
-## Установка
+> The panel's user interface is in Russian; Volt Admin is a shell around it.
 
-Готовые установщики — на странице [Releases](https://github.com/metalmon/volt-admin/releases):
+## Installation
 
-| ОС | Файл |
+Prebuilt installers are on the [Releases](https://github.com/metalmon/volt-admin/releases) page:
+
+| OS | File |
 |----|------|
-| Windows | `Вольт Админ_<версия>_x64-setup.exe` (или `.msi`) |
-| Linux (Debian/Ubuntu/Astra) | `volt-admin_<версия>_amd64.deb` |
-| Linux (RED OS/Fedora/RPM) | `volt-admin-<версия>.x86_64.rpm` |
-| macOS (Apple Silicon + Intel) | `Вольт Админ_<версия>_universal.dmg` |
+| Windows | `Volt.Admin_<version>_x64-setup.exe.zip` (or the `.msi` for GPO/SCCM) |
+| Linux (Debian/Ubuntu/Astra) | `Volt.Admin_<version>_amd64.deb` |
+| Linux (RED OS/Fedora/RPM) | `Volt.Admin-<version>-1.x86_64.rpm` |
+| macOS (Apple Silicon + Intel) | `Volt.Admin_<version>_universal.dmg` |
 
-> Установщики пока не подписаны, поэтому при первом запуске Windows SmartScreen
-> и macOS Gatekeeper покажут предупреждение — это ожидаемо до появления
-> сертификатов подписи.
+> Installers are not code-signed yet, so the first launch may trigger a
+> Windows SmartScreen or macOS Gatekeeper warning — expected until signing
+> certificates are in place.
 
-## Как пользоваться
+## Usage
 
-1. Запустите приложение — откроется список профилей.
-2. **Новый профиль → Локально** для демона на этой же машине, либо **По сети**
-   для удалённого. Для удалённого укажите хост, SSH-порт, пользователя, способ
-   входа и порт панели (по умолчанию `42617`).
-3. Нажмите **Подключить**. Для входа по паролю поле пароля появляется на карточке
-   профиля в момент подключения (пароль никуда не записывается).
+1. Launch the app — the profile list opens.
+2. **New profile → Local** for a daemon on this machine, or **Remote** for a
+   remote one. For remote, set the host, SSH port, user, sign-in method, and
+   panel port (default `42617`).
+3. Click **Connect**. For password sign-in, the password field appears on the
+   profile card at connect time (the password is never written anywhere).
 
-## Сборка из исходников
+## Building from source
 
-Нужны [Rust](https://www.rust-lang.org/tools/install), [Bun](https://bun.sh) и
-[системные зависимости Tauri 2](https://tauri.app/start/prerequisites/) для вашей
-ОС.
+Requires [Rust](https://www.rust-lang.org/tools/install), [Bun](https://bun.sh),
+and the [Tauri 2 system prerequisites](https://tauri.app/start/prerequisites/)
+for your OS.
 
 ```bash
 bun install
-bun run tauri build      # установщики → src-tauri/target/release/bundle/
-bun run tauri dev        # запуск в режиме разработки
+bun run tauri build      # installers → src-tauri/target/release/bundle/
+bun run tauri dev        # run in development mode
 ```
 
-Встроенный SSH-клиент собран на [`russh`](https://github.com/eugeny/russh) с
-крипто-бэкендом `ring` (без внешних C-зависимостей), поэтому сборка одинаково
-проходит на всех трёх ОС.
+The built-in SSH client uses [`russh`](https://github.com/eugeny/russh) with the
+`ring` crypto backend (no external C dependencies), so the build is identical
+across all three platforms.
 
-## Безопасность
+## Security
 
-- Панель удалённого демона доступна **только** через SSH-туннель к петле сервера;
-  на сетевые интерфейсы она не выставляется.
-- Проверка ключа хоста — политика *accept-new*: изменившийся ключ уже известного
-  хоста отвергается (защита от MITM), новый хост принимается при первом
-  подключении.
-- Пароли не пишутся на диск и не логируются — только транзитно в память процесса
-  на время подключения.
+- A remote daemon's panel is reachable **only** through the SSH tunnel to the
+  server's loopback; it is never exposed on network interfaces.
+- Host-key checking follows the *accept-new* policy: a changed key for an
+  already-known host is rejected (MITM protection), a new host is accepted on
+  first connection.
+- Passwords are never written to disk or logged — only held transiently in
+  process memory for the duration of the connection.
 
-## Технологии
+## Built with
 
 [Tauri 2](https://tauri.app) · Rust · React · TypeScript · Vite ·
 [russh](https://github.com/eugeny/russh)
 
-## Лицензия
+## License
 
-© 2026 metalmon. Все права защищены. Исходный код опубликован для ознакомления;
-условия использования уточняются — см. [`LICENSE`](LICENSE).
+© 2026 metalmon. All rights reserved. The source is published for reference;
+usage terms are to be determined — see [`LICENSE`](LICENSE).
