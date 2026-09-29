@@ -11,6 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
+import { useI18n } from '@/lib/i18n'
 
 // Mirrors src-tauri/src/connection.rs (serde rename_all = "camelCase").
 // NOTE: no `password` field on `Profile` — passwords are collected
@@ -46,18 +47,42 @@ const emptyDraft = (): Draft => ({
   keyPath: null,
 })
 
-// Non-jargony labels: these name what the option DOES for the user rather
-// than the SSH mechanism behind it. The `AuthMethod` values themselves
-// (`agent` / `keyFile` / `password`) are unchanged — only display text.
-const authLabels: Record<AuthMethod, string> = {
-  agent: 'Ключ (по умолчанию)',
-  keyFile: 'Файл ключа…',
-  password: 'Пароль',
+// i18n keys for the enum display labels. The `AuthMethod` / `ConnMode` values
+// themselves are unchanged — only the localized display text differs.
+const authLabelKey: Record<AuthMethod, string> = {
+  agent: 'auth.agent',
+  keyFile: 'auth.keyFile',
+  password: 'auth.password',
 }
 
-const modeLabels: Record<ConnMode, string> = {
-  local: 'Локально',
-  remote: 'По сети',
+const modeLabelKey: Record<ConnMode, string> = {
+  local: 'mode.local',
+  remote: 'mode.remote',
+}
+
+/** Compact RU/EN switcher; the choice is persisted (see `lib/i18n`). */
+function LanguageToggle() {
+  const { lang, setLang } = useI18n()
+  return (
+    <div className="inline-flex items-center gap-0.5 rounded-[var(--radius)] border border-border p-0.5">
+      {(['ru', 'en'] as const).map((l) => (
+        <button
+          key={l}
+          type="button"
+          onClick={() => setLang(l)}
+          aria-pressed={lang === l}
+          className={cn(
+            'rounded-[calc(var(--radius)-0.2rem)] px-2 py-0.5 text-xs font-medium uppercase transition-colors',
+            lang === l
+              ? 'bg-primary text-primary-foreground'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          {l}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 /**
@@ -68,6 +93,7 @@ const modeLabels: Record<ConnMode, string> = {
  * to this screen from scratch.
  */
 export default function Connect() {
+  const { t } = useI18n()
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -88,7 +114,7 @@ export default function Connect() {
       setProfiles(list)
       setError(null)
     } catch (e) {
-      setError(`Не удалось загрузить профили: ${String(e)}`)
+      setError(t('err.load', { e: String(e) }))
     } finally {
       setLoading(false)
     }
@@ -96,6 +122,7 @@ export default function Connect() {
 
   useEffect(() => {
     void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const closeForm = () => {
@@ -119,7 +146,7 @@ export default function Connect() {
 
   const saveDraft = async () => {
     if (!draft.name.trim()) {
-      setError('Введите название профиля')
+      setError(t('err.nameRequired'))
       return
     }
     const profile: Profile = { id: editingId ?? crypto.randomUUID(), ...draft }
@@ -128,7 +155,7 @@ export default function Connect() {
       closeForm()
       await refresh()
     } catch (e) {
-      setError(`Не удалось сохранить профиль: ${String(e)}`)
+      setError(t('err.save', { e: String(e) }))
     }
   }
 
@@ -137,7 +164,7 @@ export default function Connect() {
       await invoke('delete_profile', { id })
       await refresh()
     } catch (e) {
-      setError(`Не удалось удалить профиль: ${String(e)}`)
+      setError(t('err.delete', { e: String(e) }))
     }
   }
 
@@ -152,7 +179,7 @@ export default function Connect() {
       setPasswordPromptId(null)
       setPasswordValue('')
     } catch (e) {
-      setError(`Не удалось подключиться: ${String(e)}`)
+      setError(t('err.connect', { e: String(e) }))
     } finally {
       setConnectingId(null)
     }
@@ -170,9 +197,12 @@ export default function Connect() {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-10">
-      <header className="text-center">
-        <h1 className="font-heading text-2xl text-foreground">Подключение</h1>
-        <p className="text-sm text-muted-foreground">Выберите сохраненный профиль или добавьте новый.</p>
+      <header className="relative text-center">
+        <div className="absolute right-0 top-0">
+          <LanguageToggle />
+        </div>
+        <h1 className="font-heading text-2xl text-foreground">{t('app.title')}</h1>
+        <p className="text-sm text-muted-foreground">{t('app.subtitle')}</p>
       </header>
 
       {error && (
@@ -184,13 +214,13 @@ export default function Connect() {
       {loading ? (
         <div className="flex items-center gap-2 text-muted-foreground">
           <Spinner size={18} />
-          <span>Загрузка профилей…</span>
+          <span>{t('list.loading')}</span>
         </div>
       ) : (
         <ul className="flex flex-col gap-3">
           {profiles.length === 0 && (
             <li className="rounded-[var(--radius)] border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-              Сохраненных профилей нет.
+              {t('list.empty')}
             </li>
           )}
           {profiles.map((p) => (
@@ -200,22 +230,24 @@ export default function Connect() {
                   <div className="flex min-w-0 flex-col">
                     <span className="truncate font-medium text-card-foreground">{p.name}</span>
                     <span className="whitespace-nowrap text-xs text-muted-foreground">
-                      {modeLabels[p.mode]}
-                      {p.mode === 'remote' ? ` · ${p.user}@${p.host}:${p.port}` : ` · порт панели ${p.panelPort}`}
+                      {t(modeLabelKey[p.mode])}
+                      {p.mode === 'remote'
+                        ? ` · ${p.user}@${p.host}:${p.port}`
+                        : ` · ${t('card.panelPort', { port: p.panelPort })}`}
                     </span>
                   </div>
                   {/* Fluent: secondary/dismissive action on the left, primary
                       (positive) action rightmost. */}
                   <div className="flex shrink-0 items-center gap-2">
                     <Button variant="outline" onClick={() => startEdit(p)} disabled={connectingId !== null}>
-                      Изменить
+                      {t('btn.edit')}
                     </Button>
                     <Button variant="outline" onClick={() => void deleteProfile(p.id)}>
-                      Удалить
+                      {t('btn.delete')}
                     </Button>
                     <Button variant="default" onClick={() => connect(p)} disabled={connectingId !== null}>
                       {connectingId === p.id ? <Spinner size={14} /> : null}
-                      Подключить
+                      {t('btn.connect')}
                     </Button>
                   </div>
                 </CardContent>
@@ -237,7 +269,7 @@ export default function Connect() {
                           const v = e.currentTarget.value
                           setPasswordValue(v)
                         }}
-                        placeholder="Пароль SSH"
+                        placeholder={t('pwd.placeholder')}
                         className="flex-1"
                       />
                       <Button
@@ -247,10 +279,10 @@ export default function Connect() {
                           setPasswordValue('')
                         }}
                       >
-                        Отмена
+                        {t('btn.cancel')}
                       </Button>
                       <Button type="submit" variant="default" disabled={connectingId !== null}>
-                        Войти
+                        {t('btn.login')}
                       </Button>
                     </form>
                   </CardFooter>
@@ -265,7 +297,7 @@ export default function Connect() {
         <Card className="gap-4 py-5">
           <CardContent className="flex flex-col gap-4 px-5">
             <h2 className="font-heading text-lg text-foreground">
-              {editingId ? 'Изменить профиль' : 'Новый профиль'}
+              {editingId ? t('form.editTitle') : t('form.newTitle')}
             </h2>
             <form
               className="flex flex-col gap-4"
@@ -289,13 +321,13 @@ export default function Connect() {
                       }))
                     }
                   >
-                    {modeLabels[m]}
+                    {t(modeLabelKey[m])}
                   </Button>
                 ))}
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="profile-name">Название</Label>
+                <Label htmlFor="profile-name">{t('field.name')}</Label>
                 <Input
                   id="profile-name"
                   value={draft.name}
@@ -303,7 +335,7 @@ export default function Connect() {
                     const v = e.currentTarget.value
                     setDraft((d) => ({ ...d, name: v }))
                   }}
-                  placeholder="Мой сервер"
+                  placeholder={t('field.name.ph')}
                   required
                 />
               </div>
@@ -312,7 +344,7 @@ export default function Connect() {
                 <>
                   <div className="flex gap-3">
                     <div className="flex flex-1 flex-col gap-1.5">
-                      <Label htmlFor="profile-host">Хост</Label>
+                      <Label htmlFor="profile-host">{t('field.host')}</Label>
                       <Input
                         id="profile-host"
                         value={draft.host}
@@ -325,7 +357,7 @@ export default function Connect() {
                       />
                     </div>
                     <div className="flex w-24 flex-col gap-1.5">
-                      <Label htmlFor="profile-port">SSH-порт</Label>
+                      <Label htmlFor="profile-port">{t('field.sshPort')}</Label>
                       <Input
                         id="profile-port"
                         type="number"
@@ -339,7 +371,7 @@ export default function Connect() {
                   </div>
 
                   <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="profile-user">Пользователь</Label>
+                    <Label htmlFor="profile-user">{t('field.user')}</Label>
                     <Input
                       id="profile-user"
                       value={draft.user}
@@ -353,7 +385,7 @@ export default function Connect() {
                   </div>
 
                   <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="profile-auth">Способ входа</Label>
+                    <Label htmlFor="profile-auth">{t('field.auth')}</Label>
                     <Select
                       value={draft.auth}
                       onValueChange={(v) => setDraft((d) => ({ ...d, auth: v as AuthMethod }))}
@@ -362,21 +394,19 @@ export default function Connect() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(Object.keys(authLabels) as AuthMethod[]).map((a) => (
+                        {(Object.keys(authLabelKey) as AuthMethod[]).map((a) => (
                           <SelectItem key={a} value={a}>
-                            {authLabels[a]}
+                            {t(authLabelKey[a])}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
-                  <p className="-mt-2.5 text-xs text-muted-foreground">
-                    Ключ по умолчанию берется из ssh-agent/~/.ssh. Пароль — только если ключа нет.
-                  </p>
+                  <p className="-mt-2.5 text-xs text-muted-foreground">{t('auth.hint')}</p>
 
                   {draft.auth === 'keyFile' && (
                     <div className="flex flex-col gap-1.5">
-                      <Label htmlFor="profile-key-path">Путь к файлу ключа</Label>
+                      <Label htmlFor="profile-key-path">{t('field.keyPath')}</Label>
                       <Input
                         id="profile-key-path"
                         value={draft.keyPath ?? ''}
@@ -392,7 +422,7 @@ export default function Connect() {
               )}
 
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="profile-panel-port">Порт панели</Label>
+                <Label htmlFor="profile-panel-port">{t('field.panelPort')}</Label>
                 <Input
                   id="profile-panel-port"
                   type="number"
@@ -405,13 +435,13 @@ export default function Connect() {
               </div>
 
               {/* Fluent: form action row lives at the bottom-right, primary
-                  action ("Сохранить") rightmost, secondary ("Отмена") to its left. */}
+                  action ("Save") rightmost, secondary ("Cancel") to its left. */}
               <div className="flex justify-end gap-2 pt-2">
                 <Button type="button" variant="outline" onClick={closeForm}>
-                  Отмена
+                  {t('btn.cancel')}
                 </Button>
                 <Button type="submit" variant="default">
-                  Сохранить
+                  {t('btn.save')}
                 </Button>
               </div>
             </form>
@@ -423,7 +453,7 @@ export default function Connect() {
           onClick={startCreate}
           className={cn('self-end border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground')}
         >
-          + Добавить профиль
+          {t('btn.addProfile')}
         </Button>
       )}
     </main>

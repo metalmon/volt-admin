@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import Connect from './screens/Connect'
+import { LanguageProvider } from './lib/i18n'
 
 /**
  * The React app is only ever the Connect screen. Once `connect()` resolves,
@@ -20,7 +21,11 @@ import Connect from './screens/Connect'
  * needed here.
  */
 function App() {
-  return <Connect />
+  return (
+    <LanguageProvider>
+      <Connect />
+    </LanguageProvider>
+  )
 }
 
 export default App
