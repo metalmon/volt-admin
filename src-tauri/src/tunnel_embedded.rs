@@ -25,7 +25,16 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::connection::{AuthMethod, Profile};
-use crate::tunnel::TunnelError;
+use crate::tunnel::{Lang, TunnelError};
+
+/// Build a localized `Embedded` error. Both messages are formatted eagerly
+/// (they are cheap) and the one for `lang` is kept.
+fn emb(lang: Lang, ru: String, en: String) -> TunnelError {
+    TunnelError::Embedded(match lang {
+        Lang::Ru => ru,
+        Lang::En => en,
+    })
+}
 
 /// A running embedded tunnel: the local listener's accept loop plus the live
 /// `russh` session it forwards through. Aborting the task (on `close`/drop)
@@ -87,9 +96,12 @@ impl client::Handler for Handler {
 pub async fn open_embedded_tunnel(
     p: &Profile,
     password: Option<&str>,
+    lang: Lang,
 ) -> Result<EmbeddedTunnel, TunnelError> {
     if p.auth == AuthMethod::Agent {
-        return Err(TunnelError::Embedded(
+        return Err(emb(
+            lang,
+            "вход через ssh-agent не поддерживается встроенным SSH-клиентом — установите системный клиент OpenSSH либо используйте файл ключа или пароль".to_string(),
             "ssh-agent auth is not supported by the built-in SSH client — install the system OpenSSH client, or use a key file or password".to_string(),
         ));
     }
@@ -100,15 +112,25 @@ pub async fn open_embedded_tunnel(
         port: p.port,
     };
 
-    let tcp = TcpStream::connect((p.host.as_str(), p.port))
-        .await
-        .map_err(|e| TunnelError::Embedded(format!("could not connect to {}:{} — {e}", p.host, p.port)))?;
+    let tcp = TcpStream::connect((p.host.as_str(), p.port)).await.map_err(|e| {
+        emb(
+            lang,
+            format!("не удалось подключиться к {}:{} — {e}", p.host, p.port),
+            format!("could not connect to {}:{} — {e}", p.host, p.port),
+        )
+    })?;
 
     let mut session = client::connect_stream(config, tcp, handler)
         .await
-        .map_err(|e| TunnelError::Embedded(format!("SSH handshake failed: {e}")))?;
+        .map_err(|e| {
+            emb(
+                lang,
+                format!("сбой SSH-рукопожатия: {e}"),
+                format!("SSH handshake failed: {e}"),
+            )
+        })?;
 
-    authenticate(&mut session, p, password).await?;
+    authenticate(&mut session, p, password, lang).await?;
 
     let panel_port = p.panel_port;
 
@@ -118,20 +140,32 @@ pub async fn open_embedded_tunnel(
         .channel_open_direct_tcpip("127.0.0.1", panel_port as u32, "127.0.0.1", 0)
         .await
         .map_err(|e| {
-            TunnelError::Embedded(format!(
-                "panel port {panel_port} is not reachable through the tunnel — {e}"
-            ))
+            emb(
+                lang,
+                format!("порт панели {panel_port} недоступен через туннель — {e}"),
+                format!("panel port {panel_port} is not reachable through the tunnel — {e}"),
+            )
         })?;
     drop(probe);
 
     // Bind the local end and start forwarding. Binding to :0 avoids the
     // pick-then-bind race the system path has.
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(|e| TunnelError::Embedded(format!("could not bind a local port — {e}")))?;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| {
+        emb(
+            lang,
+            format!("не удалось занять локальный порт — {e}"),
+            format!("could not bind a local port — {e}"),
+        )
+    })?;
     let local_port = listener
         .local_addr()
-        .map_err(|e| TunnelError::Embedded(format!("could not read local port — {e}")))?
+        .map_err(|e| {
+            emb(
+                lang,
+                format!("не удалось определить локальный порт — {e}"),
+                format!("could not read local port — {e}"),
+            )
+        })?
         .port();
 
     let accept_task = tokio::spawn(accept_loop(listener, session, panel_port));
@@ -147,6 +181,7 @@ async fn authenticate(
     session: &mut Handle<Handler>,
     p: &Profile,
     password: Option<&str>,
+    lang: Lang,
 ) -> Result<(), TunnelError> {
     let ok = match p.auth {
         AuthMethod::Password => {
@@ -154,21 +189,41 @@ async fn authenticate(
             session
                 .authenticate_password(&p.user, pass)
                 .await
-                .map_err(|e| TunnelError::Embedded(format!("password auth error — {e}")))?
+                .map_err(|e| {
+                    emb(
+                        lang,
+                        format!("ошибка входа по паролю — {e}"),
+                        format!("password auth error — {e}"),
+                    )
+                })?
                 .success()
         }
         AuthMethod::KeyFile => {
             let key_path = p.key_path.as_deref().ok_or_else(|| {
-                TunnelError::Embedded("key-file auth selected but no key path is set".to_string())
+                emb(
+                    lang,
+                    "выбран вход по файлу ключа, но путь к ключу не задан".to_string(),
+                    "key-file auth selected but no key path is set".to_string(),
+                )
             })?;
             let key = load_secret_key(key_path, None).map_err(|e| {
-                TunnelError::Embedded(format!("could not load private key {key_path} — {e}"))
+                emb(
+                    lang,
+                    format!("не удалось загрузить приватный ключ {key_path} — {e}"),
+                    format!("could not load private key {key_path} — {e}"),
+                )
             })?;
             let key = PrivateKeyWithHashAlg::new(Arc::new(key), Some(HashAlg::Sha256));
             session
                 .authenticate_publickey(&p.user, key)
                 .await
-                .map_err(|e| TunnelError::Embedded(format!("key auth error — {e}")))?
+                .map_err(|e| {
+                    emb(
+                        lang,
+                        format!("ошибка входа по ключу — {e}"),
+                        format!("key auth error — {e}"),
+                    )
+                })?
                 .success()
         }
         AuthMethod::Agent => unreachable!("agent auth is rejected before authenticate()"),
@@ -176,7 +231,9 @@ async fn authenticate(
     if ok {
         Ok(())
     } else {
-        Err(TunnelError::Embedded(
+        Err(emb(
+            lang,
+            "аутентификация не удалась — проверьте пользователя, пароль или ключ".to_string(),
             "authentication failed — check the user, password, or key".to_string(),
         ))
     }
@@ -234,7 +291,7 @@ mod tests {
     /// before any network I/O, with a message that names the cause.
     #[tokio::test]
     async fn embedded_rejects_agent_auth() {
-        let e = open_embedded_tunnel(&profile(AuthMethod::Agent), None)
+        let e = open_embedded_tunnel(&profile(AuthMethod::Agent), None, Lang::En)
             .await
             .unwrap_err();
         assert!(matches!(e, TunnelError::Embedded(_)));
@@ -269,7 +326,7 @@ mod tests {
             ..profile(AuthMethod::Password)
         };
 
-        let tunnel = open_embedded_tunnel(&p, (!use_key).then_some(password.as_str()))
+        let tunnel = open_embedded_tunnel(&p, (!use_key).then_some(password.as_str()), Lang::En)
             .await
             .expect("embedded tunnel should open");
 

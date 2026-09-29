@@ -93,7 +93,7 @@ function LanguageToggle() {
  * to this screen from scratch.
  */
 export default function Connect() {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -175,7 +175,7 @@ export default function Connect() {
       // The `connect` command navigates the main window's webview
       // top-level to the panel once it resolves — there is nothing further
       // to do here on success (this screen is about to be replaced).
-      await invoke('connect', { profile, password })
+      await invoke('connect', { profile, password, lang })
       setPasswordPromptId(null)
       setPasswordValue('')
     } catch (e) {

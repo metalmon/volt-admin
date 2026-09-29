@@ -5,7 +5,7 @@
 //! password is ever stored — see `crate::connection` for why.
 
 use crate::connection::{ConnMode, Profile};
-use crate::tunnel::{self, TunnelState};
+use crate::tunnel::{self, Lang, TunnelState};
 use tauri::{command, AppHandle, Manager, Runtime, State};
 use tauri_plugin_store::StoreExt;
 
@@ -108,8 +108,11 @@ pub async fn connect<R: Runtime>(
     app: AppHandle<R>,
     profile: Profile,
     password: Option<String>,
+    lang: Option<String>,
     tunnel_state: State<'_, TunnelState>,
 ) -> Result<String, String> {
+    // UI language for any user-facing tunnel error (RU-first default).
+    let lang = Lang::from_code(lang.as_deref());
     let mut guard = tunnel_state.0.lock().await;
     // A new connect attempt supersedes whatever was active before;
     // dropping the old value (if any) kills its ssh child.
@@ -124,9 +127,9 @@ pub async fn connect<R: Runtime>(
             format!("127.0.0.1:{}", profile.panel_port),
         ),
         ConnMode::Remote => {
-            let tun = tunnel::open_tunnel(&profile, password.as_deref())
+            let tun = tunnel::open_tunnel(&profile, password.as_deref(), lang)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.localize(lang))?;
             let url = format!("http://127.0.0.1:{}", tun.local_port);
             *guard = Some(tun);
             (url, format!("{}:{}", profile.host, profile.panel_port))

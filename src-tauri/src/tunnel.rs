@@ -63,46 +63,101 @@ pub enum TunnelError {
     Embedded(String),
 }
 
-impl std::fmt::Display for TunnelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// UI language for user-facing error text. RU-first product; `En` is the
+/// fallback used by `Display` (logs) and when the frontend asks for English.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lang {
+    Ru,
+    En,
+}
+
+impl Lang {
+    /// Map a frontend language code ("ru"/"en") to a `Lang`; anything else
+    /// (or absent) falls back to Russian, the product default.
+    pub fn from_code(code: Option<&str>) -> Lang {
+        match code {
+            Some(c) if c.eq_ignore_ascii_case("en") => Lang::En,
+            _ => Lang::Ru,
+        }
+    }
+
+    fn pick<'a>(self, ru: &'a str, en: &'a str) -> &'a str {
         match self {
-            TunnelError::Io(e) => write!(f, "tunnel I/O error: {e}"),
+            Lang::Ru => ru,
+            Lang::En => en,
+        }
+    }
+}
+
+impl TunnelError {
+    /// The user-facing message for this error in `lang`. Free-text details
+    /// captured from the system `ssh`'s own stderr stay as OpenSSH emitted
+    /// them (English) — only the wording we author is localized.
+    pub fn localize(&self, lang: Lang) -> String {
+        match self {
+            TunnelError::Io(e) => {
+                format!("{}: {e}", lang.pick("ошибка ввода-вывода туннеля", "tunnel I/O error"))
+            }
             TunnelError::Timeout(detail) => {
+                let base = lang.pick(
+                    "истекло время ожидания запуска SSH-туннеля",
+                    "timed out waiting for the SSH tunnel to come up",
+                );
                 if detail.is_empty() {
-                    write!(f, "timed out waiting for the SSH tunnel to come up")
+                    base.to_string()
                 } else {
-                    write!(f, "timed out waiting for the SSH tunnel to come up: {detail}")
+                    format!("{base}: {detail}")
                 }
             }
             TunnelError::ProcessExited(status, detail) => {
+                let base = match lang {
+                    Lang::Ru => format!("ssh завершился до запуска туннеля (код: {status})"),
+                    Lang::En => format!("ssh exited before the tunnel came up (status: {status})"),
+                };
                 if detail.is_empty() {
-                    write!(f, "ssh exited before the tunnel came up (status: {status})")
+                    base
                 } else {
-                    write!(
-                        f,
-                        "ssh exited before the tunnel came up (status: {status}): {detail}"
-                    )
+                    format!("{base}: {detail}")
                 }
             }
-            TunnelError::MissingPassword => {
-                write!(f, "password auth selected but no password was supplied")
-            }
-            TunnelError::SshNotFound => {
-                write!(f, "{}", SSH_NOT_FOUND_HINT)
-            }
+            TunnelError::MissingPassword => lang
+                .pick(
+                    "выбран вход по паролю, но пароль не передан",
+                    "password auth selected but no password was supplied",
+                )
+                .to_string(),
+            TunnelError::SshNotFound => ssh_not_found_hint(lang).to_string(),
             TunnelError::Embedded(detail) => {
-                write!(f, "built-in SSH client: {detail}")
+                format!("{}: {detail}", lang.pick("встроенный SSH-клиент", "built-in SSH client"))
             }
         }
+    }
+}
+
+impl std::fmt::Display for TunnelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Display is for logs/Debug — English. User-facing text goes through
+        // `localize`, which the `connect` command calls with the UI language.
+        write!(f, "{}", self.localize(Lang::En))
     }
 }
 
 /// Actionable message when the `ssh` client is missing. Tailored per-OS so
 /// an unprepared user is told exactly how to get OpenSSH.
 #[cfg(windows)]
-const SSH_NOT_FOUND_HINT: &str = "OpenSSH client not found. Install it via Settings > Apps > Optional Features > \"OpenSSH Client\", then reconnect (or make sure ssh.exe is on PATH).";
+fn ssh_not_found_hint(lang: Lang) -> &'static str {
+    lang.pick(
+        "SSH-клиент OpenSSH не найден. Установите его: Параметры > Приложения > Дополнительные компоненты > «Клиент OpenSSH», затем подключитесь снова (или проверьте, что ssh.exe в PATH).",
+        "OpenSSH client not found. Install it via Settings > Apps > Optional Features > \"OpenSSH Client\", then reconnect (or make sure ssh.exe is on PATH).",
+    )
+}
 #[cfg(not(windows))]
-const SSH_NOT_FOUND_HINT: &str = "OpenSSH client not found. Install openssh-client (Debian/Astra: `apt install openssh-client`; RED OS/Fedora: `dnf install openssh-clients`; macOS ships it), then reconnect.";
+fn ssh_not_found_hint(lang: Lang) -> &'static str {
+    lang.pick(
+        "SSH-клиент OpenSSH не найден. Установите openssh-client (Debian/Astra: `apt install openssh-client`; RED OS/Fedora: `dnf install openssh-clients`; на macOS есть из коробки), затем подключитесь снова.",
+        "OpenSSH client not found. Install openssh-client (Debian/Astra: `apt install openssh-client`; RED OS/Fedora: `dnf install openssh-clients`; macOS ships it), then reconnect.",
+    )
+}
 
 /// Map an `ssh` spawn failure to a tunnel error: a missing binary becomes the
 /// actionable `SshNotFound`, everything else stays a raw I/O error.
@@ -215,12 +270,16 @@ pub struct TunnelState(pub Mutex<Option<Tunnel>>);
 /// `password` is only consulted when `p.auth == AuthMethod::Password`; it
 /// is never written to disk — it is passed to the `ssh` child only via a
 /// process-local environment variable read by a per-tunnel askpass helper.
-pub async fn open_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, TunnelError> {
+pub async fn open_tunnel(
+    p: &Profile,
+    password: Option<&str>,
+    lang: Lang,
+) -> Result<Tunnel, TunnelError> {
     // Opt-in / test override: use the built-in client outright, bypassing the
     // system `ssh` probe (lets the embedded path be exercised on a machine that
     // does have OpenSSH).
     if force_embedded() {
-        return open_embedded_as_tunnel(p, password).await;
+        return open_embedded_as_tunnel(p, password, lang).await;
     }
 
     let local_port = pick_free_port()?;
@@ -259,7 +318,7 @@ pub async fn open_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, 
             // No system `ssh`? Fall back to the built-in client so an
             // unprepared machine can still connect.
             if e.kind() == io::ErrorKind::NotFound {
-                return open_embedded_as_tunnel(p, password).await;
+                return open_embedded_as_tunnel(p, password, lang).await;
             }
             return Err(map_spawn_error(e));
         }
@@ -271,7 +330,7 @@ pub async fn open_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, 
         if let Some(path) = askpass_path {
             let _ = std::fs::remove_file(path);
         }
-        return Err(annotate_error_hint(e, p));
+        return Err(annotate_error_hint(e, p, lang));
     }
 
     Ok(Tunnel {
@@ -293,8 +352,12 @@ fn force_embedded() -> bool {
 
 /// Open a tunnel via the embedded client and wrap it as a `Tunnel` (so callers
 /// treat system- and embedded-backed tunnels identically).
-async fn open_embedded_as_tunnel(p: &Profile, password: Option<&str>) -> Result<Tunnel, TunnelError> {
-    let embedded = crate::tunnel_embedded::open_embedded_tunnel(p, password).await?;
+async fn open_embedded_as_tunnel(
+    p: &Profile,
+    password: Option<&str>,
+    lang: Lang,
+) -> Result<Tunnel, TunnelError> {
+    let embedded = crate::tunnel_embedded::open_embedded_tunnel(p, password, lang).await?;
     Ok(Tunnel {
         child: None,
         local_port: embedded.local_port,
@@ -381,7 +444,12 @@ async fn stderr_snapshot(buf: Option<&StderrBuf>) -> String {
 /// ("UNPROTECTED PRIVATE KEY FILE" / "bad permissions") and Unix ssh reject
 /// such a key, auth fails, and ssh exits — a confusing failure unless the
 /// user is told to lock the file down.
-const KEY_PERMS_HINT: &str = "the private key file's permissions are too open, so ssh refused it — restrict it to your account (Windows: `icacls \"<key>\" /inheritance:r /grant:r \"%USERNAME%:R\"`; Unix: `chmod 600 <key>`)";
+fn key_perms_hint(lang: Lang) -> &'static str {
+    lang.pick(
+        "у файла приватного ключа слишком открытые права, поэтому ssh его отверг — ограничьте доступ своей учётной записью (Windows: `icacls \"<key>\" /inheritance:r /grant:r \"%USERNAME%:R\"`; Unix: `chmod 600 <key>`)",
+        "the private key file's permissions are too open, so ssh refused it — restrict it to your account (Windows: `icacls \"<key>\" /inheritance:r /grant:r \"%USERNAME%:R\"`; Unix: `chmod 600 <key>`)",
+    )
+}
 
 /// On Windows, `AuthMethod::Password` feeds the password through
 /// `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force`. Modern Win32-OpenSSH (9.x,
@@ -391,13 +459,18 @@ const KEY_PERMS_HINT: &str = "the private key file's permissions are too open, s
 /// hang on a console prompt it never gets and surface as a bare `Timeout`.
 /// This hint is the fallback for that old-client case only.
 #[cfg(windows)]
-const WIN_PW_HINT: &str = "the SSH tunnel did not come up. If your Windows OpenSSH client is an older build it may not honor SSH_ASKPASS for password auth — update it (winget install Microsoft.OpenSSH.Beta) or use Key or Agent auth instead";
+fn win_pw_hint(lang: Lang) -> &'static str {
+    lang.pick(
+        "SSH-туннель не поднялся. Если ваш Windows-клиент OpenSSH старой версии, он может не поддерживать SSH_ASKPASS для входа по паролю — обновите его (winget install Microsoft.OpenSSH.Beta) или используйте вход по ключу или через агент",
+        "the SSH tunnel did not come up. If your Windows OpenSSH client is an older build it may not honor SSH_ASKPASS for password auth — update it (winget install Microsoft.OpenSSH.Beta) or use Key or Agent auth instead",
+    )
+}
 
 /// Turn a raw tunnel failure into an actionable one when ssh's stderr (or
 /// the auth/OS combination) points at a known, fixable cause. Key and Agent
 /// auth benefit from the key-permissions hint; the legacy-Windows password
 /// hint applies only under `AuthMethod::Password` on Windows.
-fn annotate_error_hint(e: TunnelError, p: &Profile) -> TunnelError {
+fn annotate_error_hint(e: TunnelError, p: &Profile, lang: Lang) -> TunnelError {
     if p.auth == AuthMethod::KeyFile {
         let detail = match &e {
             TunnelError::Timeout(d) | TunnelError::ProcessExited(_, d) => d.as_str(),
@@ -405,10 +478,10 @@ fn annotate_error_hint(e: TunnelError, p: &Profile) -> TunnelError {
         };
         let low = detail.to_ascii_lowercase();
         if low.contains("bad permissions") || low.contains("unprotected private key") {
-            return append_hint(e, KEY_PERMS_HINT);
+            return append_hint(e, key_perms_hint(lang));
         }
     }
-    annotate_windows_password_hint(e, p)
+    annotate_windows_password_hint(e, p, lang)
 }
 
 /// Append an actionable `hint` to the free-text detail of a `Timeout` /
@@ -429,21 +502,20 @@ fn append_hint(e: TunnelError, hint: &str) -> TunnelError {
 }
 
 #[cfg(windows)]
-fn annotate_windows_password_hint(e: TunnelError, p: &Profile) -> TunnelError {
+fn annotate_windows_password_hint(e: TunnelError, p: &Profile, lang: Lang) -> TunnelError {
     if p.auth != AuthMethod::Password {
         return e;
     }
+    let hint = win_pw_hint(lang);
     match e {
-        TunnelError::Timeout(detail) if detail.is_empty() => {
-            TunnelError::Timeout(WIN_PW_HINT.to_string())
-        }
-        TunnelError::Timeout(detail) => TunnelError::Timeout(format!("{detail} ({WIN_PW_HINT})")),
+        TunnelError::Timeout(detail) if detail.is_empty() => TunnelError::Timeout(hint.to_string()),
+        TunnelError::Timeout(detail) => TunnelError::Timeout(format!("{detail} ({hint})")),
         other => other,
     }
 }
 
 #[cfg(not(windows))]
-fn annotate_windows_password_hint(e: TunnelError, _p: &Profile) -> TunnelError {
+fn annotate_windows_password_hint(e: TunnelError, _p: &Profile, _lang: Lang) -> TunnelError {
     e
 }
 
@@ -587,7 +659,7 @@ mod tests {
             ..test_profile()
         };
         let raw = TunnelError::Timeout("Load key \"/k\": bad permissions".to_string());
-        let msg = annotate_error_hint(raw, &p).to_string().to_lowercase();
+        let msg = annotate_error_hint(raw, &p, Lang::En).to_string().to_lowercase();
         assert!(msg.contains("permission"));
         assert!(msg.contains("icacls") || msg.contains("chmod"));
     }
@@ -599,8 +671,27 @@ mod tests {
             ..test_profile()
         };
         let raw = TunnelError::Timeout("some unrelated failure".to_string());
-        let annotated = annotate_error_hint(raw, &p).to_string();
+        let annotated = annotate_error_hint(raw, &p, Lang::En).to_string();
         assert!(annotated.contains("some unrelated failure"));
         assert!(!annotated.to_lowercase().contains("icacls"));
+    }
+
+    #[test]
+    fn localize_switches_language() {
+        // The same error renders in the requested language.
+        let e = TunnelError::MissingPassword;
+        assert!(e.localize(Lang::En).contains("password auth selected"));
+        assert!(e.localize(Lang::Ru).contains("паролю"));
+        // Display is the English form (for logs).
+        assert_eq!(e.to_string(), e.localize(Lang::En));
+    }
+
+    #[test]
+    fn lang_from_code_defaults_to_russian() {
+        assert_eq!(Lang::from_code(Some("en")), Lang::En);
+        assert_eq!(Lang::from_code(Some("EN")), Lang::En);
+        assert_eq!(Lang::from_code(Some("ru")), Lang::Ru);
+        assert_eq!(Lang::from_code(Some("de")), Lang::Ru); // ambiguous → RU
+        assert_eq!(Lang::from_code(None), Lang::Ru);
     }
 }
