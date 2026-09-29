@@ -106,6 +106,16 @@ jobs:
           name: volt-admin-windows-nsis
           path: src-tauri/target/release/bundle/nsis/*.zip
 
+      # Raw .msi as well — enterprise admins want it for silent deploy via
+      # GPO/SCCM. (Left unzipped: it is fetched by deployment tooling, not a
+      # bare double-click, so the SmartScreen-zip trick doesn't apply.)
+      - name: Upload Windows MSI
+        if: matrix.target == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: volt-admin-windows-msi
+          path: src-tauri/target/release/bundle/msi/*.msi
+
       - name: Upload Linux packages
         if: matrix.target == 'linux'
         uses: actions/upload-artifact@v4
