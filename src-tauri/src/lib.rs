@@ -29,10 +29,11 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(tunnel::TunnelState::default())
         .manage(pair::PairState::default())
-        // Lazy pairing on the connected panel origin (see `crate::pair`): a
-        // normal load gets the probe (asks for a code only without a session);
-        // a `/?volt_pair=1` load gets a freshly minted code — or a banner
-        // saying why there is none.
+        // Lazy pairing on the connected panel origin (see `crate::pair`): every
+        // load first gets the gateway admin token (when held) for the panel's
+        // own pair-code button; then a normal load gets the probe (asks for a
+        // code only without a session); a `/?volt_pair=1` load gets a freshly
+        // minted code — or a banner saying why there is none.
         .on_page_load(|webview, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
@@ -40,6 +41,9 @@ pub fn run() {
             let Some(ctx) = webview.state::<pair::PairState>().for_url(payload.url()) else {
                 return;
             };
+            if let Some(token) = &ctx.admin_token {
+                let _ = webview.eval(&pair::token_script(token));
+            }
             if !pair::is_pair_request(payload.url()) {
                 let _ = webview.eval(pair::PROBE_SCRIPT);
                 return;

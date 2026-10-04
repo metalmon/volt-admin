@@ -149,6 +149,18 @@ pub async fn connect<R: Runtime>(
     };
     drop(guard);
 
+    // The gateway admin token for the panel's own "connect a new device"
+    // button (see `crate::pair`). Failure just means no token; the panel then
+    // shows its usual CLI hint. The token itself is never logged.
+    let admin_token =
+        match pair::fetch_admin_token(&profile, password.as_deref(), embedded, lang).await {
+            Ok(token) => Some(token),
+            Err(reason) => {
+                eprintln!("[volt-admin] gateway admin token unavailable: {reason}");
+                None
+            }
+        };
+
     // Remember what a pairing code for this connection would need, so the
     // page-load hook can mint one on demand (see `crate::pair::PairContext`
     // for the password's lifetime). Set before navigating: the first page
@@ -160,6 +172,7 @@ pub async fn connect<R: Runtime>(
             password: password.clone(),
             embedded,
             lang,
+            admin_token,
         });
     }
 

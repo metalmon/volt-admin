@@ -7,8 +7,16 @@
 //! `Local` mode, over the same SSH credentials as the tunnel in `Remote` mode)
 //! and prints a fresh one-time code bound to an administrator principal. Only
 //! that one-time code travels to the panel, which redeems it through its own
-//! public `POST /api/pair` exactly as a person typing it would. The admin
-//! token never leaves the host and is never seen by this app.
+//! public `POST /api/pair` exactly as a person typing it would.
+//!
+//! The panel's own "connect a new device" button needs that same admin token
+//! (`x-zeroclaw-admin-token` on `POST /admin/paircode/new`), which a browser
+//! never has. This app is authenticated on the gateway machine, so `connect`
+//! reads `<config-dir>/data/gateway-admin.token` there (`fetch_admin_token`)
+//! and keeps it in the `PairContext` — memory only, cleared on disconnect,
+//! never logged or persisted — and `token_script` hands it to every page load
+//! of the panel origin as `window.__voltAdminToken`. No token = the panel
+//! shows its usual CLI hint.
 //!
 //! No code is minted unless the panel needs one. On every normal page load
 //! of the panel origin, `PROBE_SCRIPT` checks for a stored session token; if
@@ -60,6 +68,9 @@ pub struct PairContext {
     /// The tunnel runs on the built-in SSH client (no exec path).
     pub embedded: bool,
     pub lang: Lang,
+    /// The gateway admin token read from the gateway machine at connect time
+    /// (see the module docs); `None` when it could not be read.
+    pub admin_token: Option<String>,
 }
 
 /// Tauri-managed state: the context of the active connection, if any.
@@ -153,6 +164,56 @@ pub async fn mint_code(
             Lang::En => format!("the pairing-code command printed no code: {tail}"),
         }
     })
+}
+
+/// Prints the gateway admin token on the gateway machine (`Remote` mode): the
+/// kit container exports `ZEROCLAW_CONFIG_DIR`, a native install keeps it
+/// under `~/.zeroclaw`.
+const TOKEN_COMMAND: &str =
+    "cat \"${ZEROCLAW_CONFIG_DIR:-$HOME/.zeroclaw}/data/gateway-admin.token\"";
+
+/// Read the gateway admin token from where voltd lives (this machine in
+/// `Local` mode, the SSH target in `Remote` mode). The error is for the log
+/// only; callers treat any failure as "no token".
+pub async fn fetch_admin_token(
+    p: &Profile,
+    password: Option<&str>,
+    embedded: bool,
+    lang: Lang,
+) -> Result<String, String> {
+    let raw = match p.mode {
+        ConnMode::Local => {
+            let dir = std::env::var_os("ZEROCLAW_CONFIG_DIR")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .or_else(|| std::env::var_os("USERPROFILE"))
+                        .map(|h| std::path::PathBuf::from(h).join(".zeroclaw"))
+                })
+                .ok_or("no ZEROCLAW_CONFIG_DIR, HOME or USERPROFILE")?;
+            let path = dir.join("data").join("gateway-admin.token");
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        ConnMode::Remote if embedded => return Err("built-in ssh client has no exec path".into()),
+        ConnMode::Remote => {
+            tunnel::run_ssh_command(p, password, TOKEN_COMMAND, EXEC_TIMEOUT, lang).await?
+        }
+    };
+    validate_token(&raw).ok_or_else(|| "token file content does not look like a token".into())
+}
+
+/// Trim `raw` and accept it only if it is a single non-empty line without
+/// whitespace (a shell error message or an empty file is not a token).
+pub fn validate_token(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    (!t.is_empty() && !t.chars().any(char::is_whitespace)).then(|| t.to_string())
+}
+
+/// Evaluated on every load of the panel origin when a token is held: the
+/// panel adds `x-zeroclaw-admin-token` to its pair-code requests when this
+/// global exists.
+pub fn token_script(token: &str) -> String {
+    format!("window.__voltAdminToken = '{}';", js_str(token))
 }
 
 /// Run `command` through the local shell, windowless, with a timeout; returns
@@ -362,6 +423,27 @@ mod tests {
     }
 
     #[test]
+    fn token_validation_accepts_one_bare_line_only() {
+        assert_eq!(
+            validate_token("  abcDEF0123-_\r\n").as_deref(),
+            Some("abcDEF0123-_")
+        );
+        assert!(validate_token("").is_none());
+        assert!(validate_token("  \n\n").is_none());
+        assert!(validate_token("line1\nline2").is_none());
+        assert!(validate_token("cat: no such file").is_none());
+    }
+
+    #[test]
+    fn token_script_escapes_the_literal() {
+        assert_eq!(
+            token_script("a'b<c>"),
+            "window.__voltAdminToken = 'a\\'b\\x3cc\\x3e';"
+        );
+        assert!(TOKEN_COMMAND.contains("${ZEROCLAW_CONFIG_DIR:-$HOME/.zeroclaw}"));
+    }
+
+    #[test]
     fn origin_comparison_ignores_the_path() {
         let a = tauri::Url::parse("http://127.0.0.1:52610/sessions?x=1").unwrap();
         assert!(same_origin(&a, "http://127.0.0.1:52610"));
@@ -382,12 +464,14 @@ mod tests {
             password: Some("pw".into()),
             embedded: false,
             lang: Lang::Ru,
+            admin_token: Some("tok".into()),
         });
         let other = tauri::Url::parse("http://127.0.0.1:2/").unwrap();
         assert!(state.for_url(&other).is_none());
         let mine = tauri::Url::parse("http://127.0.0.1:1/?volt_pair=1").unwrap();
         let ctx = state.for_url(&mine).expect("same origin");
         assert_eq!(ctx.password.as_deref(), Some("pw"));
+        assert_eq!(ctx.admin_token.as_deref(), Some("tok"));
         assert_eq!(ctx.profile.id, "a");
         // Not consumed by a lookup: a later page load still sees it.
         assert!(state.for_url(&mine).is_some());
