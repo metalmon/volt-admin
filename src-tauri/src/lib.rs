@@ -28,16 +28,43 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(tunnel::TunnelState::default())
-        .manage(pair::PendingPair::default())
-        // Once the panel origin a `connect` navigated to has finished
-        // loading, run the queued pairing (or warning) script in it.
+        .manage(pair::PairState::default())
+        // Lazy pairing on the connected panel origin (see `crate::pair`): a
+        // normal load gets the probe (asks for a code only without a session);
+        // a `/?volt_pair=1` load gets a freshly minted code — or a banner
+        // saying why there is none.
         .on_page_load(|webview, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
             }
-            if let Some(script) = webview.state::<pair::PendingPair>().take_for(payload.url()) {
-                let _ = webview.eval(&script);
+            let Some(ctx) = webview.state::<pair::PairState>().for_url(payload.url()) else {
+                return;
+            };
+            if !pair::is_pair_request(payload.url()) {
+                let _ = webview.eval(pair::PROBE_SCRIPT);
+                return;
             }
+            let webview = webview.clone();
+            tauri::async_runtime::spawn(async move {
+                let script = match pair::mint_code(
+                    &ctx.profile,
+                    ctx.password.as_deref(),
+                    ctx.embedded,
+                    ctx.lang,
+                )
+                .await
+                {
+                    Ok(code) => pair::pair_script(&code),
+                    Err(reason) => {
+                        eprintln!("[volt-admin] auto-pair unavailable: {reason}");
+                        pair::warning_script(&match ctx.lang {
+                            tunnel::Lang::Ru => format!("Автосопряжение не выполнено: {reason}"),
+                            tunnel::Lang::En => format!("Auto-pairing skipped: {reason}"),
+                        })
+                    }
+                };
+                let _ = webview.eval(&script);
+            });
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,

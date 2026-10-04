@@ -178,10 +178,9 @@ export default function Connect() {
     try {
       // The `connect` command navigates the main window's webview
       // top-level to the panel once it resolves — there is nothing further
-      // to do here on success (this screen is about to be replaced).
-      // The result's `pairWarning` is also shown by the app inside the panel
-      // (a dismissable banner), since this screen is about to be replaced.
-      await invoke<{ baseUrl: string; pairWarning: string | null }>('connect', {
+      // to do here on success (this screen is about to be replaced). Pairing
+      // happens lazily inside the panel afterwards (see src-tauri/src/pair.rs).
+      await invoke<{ baseUrl: string }>('connect', {
         profile,
         password,
         lang,
@@ -462,7 +461,7 @@ export default function Connect() {
                 <Label htmlFor="profile-paircode-command">{t('field.paircodeCommand')}</Label>
                 <Input
                   id="profile-paircode-command"
-                  placeholder={`voltd gateway get-paircode --new --port ${draft.panelPort} --principal ${draft.principal || 'admin'}`}
+                  placeholder={t('field.paircodeCommand.ph')}
                   value={draft.paircodeCommand ?? ''}
                   onChange={(e) => {
                     const v = e.currentTarget.value

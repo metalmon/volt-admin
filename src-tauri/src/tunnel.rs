@@ -1,7 +1,8 @@
 //! SSH tunnel manager for Remote-mode connections.
 //!
 //! Spawns `ssh -N -L <localport>:127.0.0.1:<panel_port> ...` to forward a
-//! free local port to the `voltd` panel port listening on the *server's*
+//! per-profile stable local port (see `preferred_port`) to the `voltd` panel
+//! port listening on the *server's*
 //! loopback interface (never `0.0.0.0` — the tunnel must not expose the
 //! panel on the server's LAN-facing interfaces). `Local` mode never goes
 //! through this module: it returns `http://127.0.0.1:<panel_port>` directly.
@@ -299,7 +300,9 @@ pub async fn open_tunnel(
         return open_embedded_as_tunnel(p, password, lang).await;
     }
 
-    let local_port = pick_free_port()?;
+    // Bind-then-release: ssh binds the same port right after (see
+    // `bind_stable_listener` for the TOCTOU note).
+    let local_port = bind_stable_listener(&p.id)?.local_addr()?.port();
     let args = build_ssh_args(p, local_port);
 
     let mut cmd = Command::new("ssh");
@@ -454,15 +457,39 @@ async fn open_embedded_as_tunnel(
     })
 }
 
-/// Bind an ephemeral port on the loopback interface to discover a free
-/// local port, then release it immediately so `ssh` can bind it. There is
-/// an inherent (small) TOCTOU race between the release and `ssh` binding
-/// the same port; acceptable for a single-user desktop tool.
-fn pick_free_port() -> Result<u16, TunnelError> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+/// First local port tried for a profile: `PORT_BASE + fnv1a(profile.id) %
+/// PORT_SPAN`. The panel's origin is `http://127.0.0.1:<port>`, and WebView2
+/// keys localStorage (where the panel keeps its session token) by origin —
+/// so the same profile must get the same port across restarts or the panel
+/// would re-pair on every connect.
+pub const PORT_BASE: u16 = 41000;
+pub const PORT_SPAN: u16 = 4000;
+/// How many consecutive ports after the preferred one are tried before
+/// falling back to an ephemeral port.
+const PORT_TRIES: u16 = 20;
+
+pub fn preferred_port(profile_id: &str) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in profile_id.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    PORT_BASE + (h % u32::from(PORT_SPAN)) as u16
+}
+
+/// Bind a loopback listener on the profile's stable port, or the next free
+/// one after it, or (last resort) any ephemeral port. The system-`ssh` path
+/// reads the port and drops the listener so `ssh` can bind it — an inherent
+/// (small) TOCTOU race, acceptable for a single-user desktop tool; the
+/// embedded path keeps the listener.
+pub fn bind_stable_listener(profile_id: &str) -> io::Result<std::net::TcpListener> {
+    let first = preferred_port(profile_id);
+    for port in first..first.saturating_add(PORT_TRIES) {
+        if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", port)) {
+            return Ok(l);
+        }
+    }
+    std::net::TcpListener::bind(("127.0.0.1", 0))
 }
 
 /// Poll the forwarded local port until it accepts a TCP connection, the
@@ -780,6 +807,28 @@ mod tests {
         assert!(e.localize(Lang::Ru).contains("паролю"));
         // Display is the English form (for logs).
         assert_eq!(e.to_string(), e.localize(Lang::En));
+    }
+
+    #[test]
+    fn preferred_port_is_deterministic_and_in_range() {
+        assert_eq!(preferred_port("a1b2"), preferred_port("a1b2"));
+        for id in ["", "a1b2", "profile-7", "0000-1111-2222"] {
+            let p = preferred_port(id);
+            assert!((PORT_BASE..PORT_BASE + PORT_SPAN).contains(&p), "{id}: {p}");
+        }
+        assert_ne!(preferred_port("a1b2"), preferred_port("b2a1"));
+    }
+
+    #[test]
+    fn stable_bind_falls_through_to_the_next_port_when_taken() {
+        let id = "bind-test";
+        let first = preferred_port(id);
+        let held = std::net::TcpListener::bind(("127.0.0.1", first)).ok();
+        let got = bind_stable_listener(id).unwrap().local_addr().unwrap().port();
+        match held {
+            Some(_) => assert!((first + 1..first + PORT_TRIES).contains(&got), "{got}"),
+            None => assert!((first..first + PORT_TRIES).contains(&got), "{got}"),
+        }
     }
 
     #[test]

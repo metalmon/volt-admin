@@ -5,7 +5,7 @@
 //! password is ever stored — see `crate::connection` for why.
 
 use crate::connection::{ConnMode, Profile};
-use crate::pair::{self, PendingPair};
+use crate::pair::{self, PairContext, PairState};
 use crate::tunnel::{self, Lang, TunnelState};
 use serde::Serialize;
 use tauri::{command, AppHandle, Manager, Runtime, State};
@@ -100,14 +100,12 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectResult {
     pub base_url: String,
-    /// Why automatic pairing did not happen (the panel then shows its own
-    /// pairing prompt); `None` when a code was minted.
-    pub pair_warning: Option<String>,
 }
 
 /// Connect to a profile's `voltd` runtime, navigate the main window's
 /// webview top-level to the panel (see `navigate_main_window`), and return
-/// the panel's base URL plus the auto-pairing outcome.
+/// the panel's base URL. Pairing is not done here: the panel asks for a code
+/// on load only if it has no session (see `crate::pair`).
 ///
 /// - `Local` mode never opens a tunnel: it uses the direct panel URL.
 /// - `Remote` mode opens an SSH `-L` tunnel (tearing down any previously
@@ -151,31 +149,19 @@ pub async fn connect<R: Runtime>(
     };
     drop(guard);
 
-    // Mint a one-time pairing code on the gateway machine and queue the
-    // panel-side redeem for when the panel has loaded (see `crate::pair`).
-    // A failure here is informational: the panel still opens with its own
-    // pairing prompt.
-    let pair_warning = match pair::mint_code(&profile, password.as_deref(), embedded, lang).await {
-        Ok(code) => {
-            if let Some(origin) = pair::origin_of(&base_url) {
-                app.state::<PendingPair>()
-                    .set(origin, pair::pair_script(&code));
-            }
-            None
-        }
-        Err(reason) => {
-            eprintln!("[volt-admin] auto-pair unavailable: {reason}");
-            if let Some(origin) = pair::origin_of(&base_url) {
-                let text = match lang {
-                    Lang::Ru => format!("Автосопряжение не выполнено: {reason}"),
-                    Lang::En => format!("Auto-pairing skipped: {reason}"),
-                };
-                app.state::<PendingPair>()
-                    .set(origin, pair::warning_script(&text));
-            }
-            Some(reason)
-        }
-    };
+    // Remember what a pairing code for this connection would need, so the
+    // page-load hook can mint one on demand (see `crate::pair::PairContext`
+    // for the password's lifetime). Set before navigating: the first page
+    // load must already see it.
+    if let Some(origin) = pair::origin_of(&base_url) {
+        app.state::<PairState>().set(PairContext {
+            origin,
+            profile: profile.clone(),
+            password: password.clone(),
+            embedded,
+            lang,
+        });
+    }
 
     // Capture the app-entry URL (the Connect screen the webview is currently
     // showing) before we navigate away, so `disconnect` knows where to go
@@ -199,10 +185,7 @@ pub async fn connect<R: Runtime>(
         let _ = window.set_title(&format!("{} ({}) — Вольт Админ", profile.name, endpoint));
     }
 
-    Ok(ConnectResult {
-        base_url,
-        pair_warning,
-    })
+    Ok(ConnectResult { base_url })
 }
 
 /// Tear down the active tunnel (if any) and navigate the main window's
@@ -215,10 +198,13 @@ pub async fn disconnect<R: Runtime>(
     app: AppHandle<R>,
     tunnel_state: State<'_, TunnelState>,
     start_url: State<'_, StartUrl>,
+    pair_state: State<'_, PairState>,
 ) -> Result<(), String> {
     let mut guard = tunnel_state.0.lock().await;
     *guard = None; // Drop kills the ssh child.
     drop(guard);
+    // Forget the connection's pairing context (and with it the password).
+    pair_state.clear();
 
     // Back to the launcher identity in the title bar.
     if let Some(window) = app.get_webview_window("main") {

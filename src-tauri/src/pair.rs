@@ -10,8 +10,16 @@
 //! public `POST /api/pair` exactly as a person typing it would. The admin
 //! token never leaves the host and is never seen by this app.
 //!
-//! The code is consumed only when the panel holds no session token yet; an
-//! unused code is simply replaced by the next mint.
+//! No code is minted unless the panel needs one. On every normal page load
+//! of the panel origin, `PROBE_SCRIPT` checks for a stored session token; if
+//! there is none it navigates to `/?volt_pair=1`. That marker is the
+//! panel-side request for a code: the app then runs the pairing-code command
+//! and evaluates `pair_script` in the page, which redeems the code and drops
+//! back to `/`. A panel that already has a session never triggers a mint.
+//!
+//! The panel's origin is `http://127.0.0.1:<local port>`; the tunnel keeps
+//! that port stable per profile (see `crate::tunnel::preferred_port`), so the
+//! session stored by the panel survives reconnects and app restarts.
 
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -33,31 +41,54 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// A pairing script waiting for the panel origin to finish loading.
-pub struct Pending {
+/// Everything needed to mint a pairing code for the connection currently
+/// shown in the webview.
+///
+/// `password` is the SSH password typed at connect time (Password auth only).
+/// It stays in memory for as long as the connection is up because the code is
+/// minted on demand — only when the panel reports it has no session, which
+/// can happen any time after connect — and minting in `Remote` mode is an
+/// `ssh` exec with the same credentials as the tunnel. It never reaches disk:
+/// `connect` replaces it, `disconnect` clears it, and `Profile` has no
+/// password field by design.
+#[derive(Clone)]
+pub struct PairContext {
+    /// `scheme://host:port` of the panel; page loads elsewhere are ignored.
     pub origin: String,
-    pub script: String,
+    pub profile: Profile,
+    pub password: Option<String>,
+    /// The tunnel runs on the built-in SSH client (no exec path).
+    pub embedded: bool,
+    pub lang: Lang,
 }
 
-/// Tauri-managed state: the script to run on the next page load of `origin`.
+/// Tauri-managed state: the context of the active connection, if any.
 #[derive(Default)]
-pub struct PendingPair(pub Mutex<Option<Pending>>);
+pub struct PairState(pub Mutex<Option<PairContext>>);
 
-impl PendingPair {
-    pub fn set(&self, origin: String, script: String) {
-        *self.0.lock().expect("PendingPair mutex poisoned") = Some(Pending { origin, script });
+impl PairState {
+    pub fn set(&self, ctx: PairContext) {
+        *self.0.lock().expect("PairState mutex poisoned") = Some(ctx);
     }
 
-    /// Take the pending script if `url` belongs to its origin.
-    pub fn take_for(&self, url: &tauri::Url) -> Option<String> {
-        let mut guard = self.0.lock().expect("PendingPair mutex poisoned");
-        let matches = guard.as_ref().is_some_and(|p| same_origin(url, &p.origin));
-        if matches {
-            guard.take().map(|p| p.script)
-        } else {
-            None
-        }
+    pub fn clear(&self) {
+        *self.0.lock().expect("PairState mutex poisoned") = None;
     }
+
+    /// The active context if `url` belongs to its origin.
+    pub fn for_url(&self, url: &tauri::Url) -> Option<PairContext> {
+        self.0
+            .lock()
+            .expect("PairState mutex poisoned")
+            .as_ref()
+            .filter(|c| same_origin(url, &c.origin))
+            .cloned()
+    }
+}
+
+/// Does a page URL carry the pairing request marker (`/?volt_pair=1`)?
+pub fn is_pair_request(url: &tauri::Url) -> bool {
+    url.query_pairs().any(|(k, v)| k == "volt_pair" && v == "1")
 }
 
 /// Principal id for the minted code.
@@ -69,16 +100,32 @@ pub fn principal(p: &Profile) -> String {
 }
 
 /// The command that prints a fresh pairing code on the machine with voltd.
+///
+/// The default reaches voltd wherever it runs on that machine: a `voltd`
+/// on PATH (native install, running as the SSH user) or, failing that, the
+/// pilot kit's container (`docker exec voltd ...`, whose private listener is
+/// always 42617 inside). A Windows machine in `Local` mode has no POSIX
+/// shell, so there the native form is used as is.
 pub fn paircode_command(p: &Profile) -> String {
-    match p.paircode_command.as_deref().map(str::trim) {
-        Some(cmd) if !cmd.is_empty() => cmd
-            .replace("{panel_port}", &p.panel_port.to_string())
-            .replace("{principal}", &principal(p)),
-        _ => format!(
-            "voltd gateway get-paircode --new --port {} --principal {}",
-            p.panel_port,
-            principal(p)
-        ),
+    if let Some(cmd) = p.paircode_command.as_deref().map(str::trim) {
+        if !cmd.is_empty() {
+            return cmd
+                .replace("{panel_port}", &p.panel_port.to_string())
+                .replace("{principal}", &principal(p));
+        }
+    }
+    let principal = principal(p);
+    let native = format!(
+        "voltd gateway get-paircode --new --port {} --principal {principal}",
+        p.panel_port
+    );
+    let docker = format!(
+        "docker exec voltd voltd --config-dir /voltd-data/.voltd gateway get-paircode --new --port 42617 --principal {principal}"
+    );
+    if p.mode == ConnMode::Local && cfg!(windows) {
+        native
+    } else {
+        format!("if command -v voltd >/dev/null 2>&1; then {native}; else {docker}; fi")
     }
 }
 
@@ -202,19 +249,28 @@ pub fn js_str(s: &str) -> String {
     out
 }
 
-/// The script evaluated in the panel once it has loaded: if the panel has no
-/// session yet, redeem the one-time code through the panel's own public
-/// pairing endpoint and store the session the way the panel does itself
-/// (`zeroclaw_token` in localStorage, see the panel's web/src/lib/auth.ts),
-/// then reload so the panel picks it up. Any failure leaves the panel's
-/// normal pairing prompt in place.
+/// Evaluated on every normal load of the panel origin: with a stored session
+/// (`zeroclaw_token` in localStorage, see the panel's web/src/lib/auth.ts)
+/// nothing happens; without one, navigate to `/?volt_pair=1` to ask the app
+/// for a code. A page already carrying the marker is left alone so a failed
+/// mint cannot loop — the panel's own pairing prompt stays usable there.
+pub const PROBE_SCRIPT: &str = "(function(){try{var K='zeroclaw_token';if(localStorage.getItem(K))return;\
+if(location.search.indexOf('volt_pair=1')>=0)return;\
+location.replace('/?volt_pair=1');}catch(e){}})();";
+
+/// Evaluated on the `/?volt_pair=1` load once a code is minted: if the panel
+/// still has no session, redeem the one-time code through the panel's own
+/// public pairing endpoint, store the session the way the panel does itself,
+/// then go back to `/` (dropping the marker) so the panel picks it up. Any
+/// failure leaves the panel's normal pairing prompt in place and does not
+/// navigate again.
 pub fn pair_script(code: &str) -> String {
     format!(
         "(function(){{try{{var K='zeroclaw_token';if(localStorage.getItem(K))return;\
 fetch('/api/pair',{{method:'POST',headers:{{'Content-Type':'application/json'}},\
 body:JSON.stringify({{code:'{code}',device_name:'Volt Admin',device_type:'browser'}})}})\
 .then(function(r){{return r.ok?r.json():Promise.reject(new Error('pair '+r.status));}})\
-.then(function(d){{localStorage.setItem(K,d.token);location.reload();}})\
+.then(function(d){{localStorage.setItem(K,d.token);location.replace('/');}})\
 .catch(function(e){{console.warn('[volt-admin] auto-pair skipped:',e&&e.message);}});}}catch(e){{}}}})();",
         code = js_str(code)
     )
@@ -277,9 +333,10 @@ mod tests {
 
     #[test]
     fn default_command_targets_the_panel_port_and_admin_principal() {
-        assert_eq!(
-            paircode_command(&profile()),
-            "voltd gateway get-paircode --new --port 42617 --principal admin"
+        let remote = paircode_command(&profile());
+        assert!(
+            remote.starts_with("if command -v voltd >/dev/null 2>&1; then voltd gateway get-paircode --new --port 42617 --principal admin; else docker exec voltd voltd --config-dir /voltd-data/.voltd gateway get-paircode --new --port 42617 --principal admin; fi"),
+            "got: {remote}"
         );
         let mut p = profile();
         p.principal = Some(" ops ".into());
@@ -328,13 +385,41 @@ mod tests {
     }
 
     #[test]
-    fn pending_pair_is_taken_once_for_its_origin_only() {
-        let state = PendingPair::default();
-        state.set("http://127.0.0.1:1".into(), "x".into());
+    fn pair_context_matches_its_origin_only_and_clears() {
+        let state = PairState::default();
+        state.set(PairContext {
+            origin: "http://127.0.0.1:1".into(),
+            profile: profile(),
+            password: Some("pw".into()),
+            embedded: false,
+            lang: Lang::Ru,
+        });
         let other = tauri::Url::parse("http://127.0.0.1:2/").unwrap();
-        assert!(state.take_for(&other).is_none());
-        let mine = tauri::Url::parse("http://127.0.0.1:1/").unwrap();
-        assert_eq!(state.take_for(&mine).as_deref(), Some("x"));
-        assert!(state.take_for(&mine).is_none());
+        assert!(state.for_url(&other).is_none());
+        let mine = tauri::Url::parse("http://127.0.0.1:1/?volt_pair=1").unwrap();
+        let ctx = state.for_url(&mine).expect("same origin");
+        assert_eq!(ctx.password.as_deref(), Some("pw"));
+        assert_eq!(ctx.profile.id, "a");
+        // Not consumed by a lookup: a later page load still sees it.
+        assert!(state.for_url(&mine).is_some());
+        state.clear();
+        assert!(state.for_url(&mine).is_none());
+    }
+
+    #[test]
+    fn probe_asks_for_a_code_only_without_session_and_marker() {
+        assert!(PROBE_SCRIPT.contains("zeroclaw_token"));
+        assert!(PROBE_SCRIPT.contains("location.replace('/?volt_pair=1')"));
+        assert!(PROBE_SCRIPT.contains("indexOf('volt_pair=1')>=0)return"));
+        assert!(pair_script("x").contains("location.replace('/')"));
+        assert!(!pair_script("x").contains("reload"));
+    }
+
+    #[test]
+    fn pair_request_marker_is_read_from_the_query() {
+        let yes = tauri::Url::parse("http://127.0.0.1:1/?volt_pair=1").unwrap();
+        let no = tauri::Url::parse("http://127.0.0.1:1/sessions?x=1").unwrap();
+        assert!(is_pair_request(&yes));
+        assert!(!is_pair_request(&no));
     }
 }

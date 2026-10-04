@@ -150,15 +150,21 @@ pub async fn open_embedded_tunnel(
         })?;
     drop(probe);
 
-    // Bind the local end and start forwarding. Binding to :0 avoids the
-    // pick-then-bind race the system path has.
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| {
-        emb(
-            lang,
-            format!("не удалось занять локальный порт — {e}"),
-            format!("could not bind a local port — {e}"),
-        )
-    })?;
+    // Bind the local end (the profile's stable port, so the panel origin and
+    // its stored session survive reconnects) and start forwarding. The
+    // listener is kept, so there is no pick-then-bind race here.
+    let listener = crate::tunnel::bind_stable_listener(&p.id)
+        .and_then(|l| {
+            l.set_nonblocking(true)?;
+            TcpListener::from_std(l)
+        })
+        .map_err(|e| {
+            emb(
+                lang,
+                format!("не удалось занять локальный порт — {e}"),
+                format!("could not bind a local port — {e}"),
+            )
+        })?;
     let local_port = listener
         .local_addr()
         .map_err(|e| {
