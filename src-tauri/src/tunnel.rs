@@ -36,6 +36,12 @@ use crate::connection::{AuthMethod, Profile};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Win32 `CREATE_NO_WINDOW` process-creation flag: run a console child
+/// without a visible console window. Must be set on every process this app
+/// spawns, since the app itself is a windowed (console-less) executable.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Errors that can occur while opening or maintaining an SSH tunnel.
 #[derive(Debug)]
 pub enum TunnelError {
@@ -288,6 +294,12 @@ pub async fn open_tunnel(
     let mut cmd = Command::new("ssh");
     cmd.args(&args);
     cmd.kill_on_drop(true);
+    // The app itself has no console, so without this Windows would open a
+    // visible console window for `ssh` (and, inherited from it, for the
+    // askpass helper). CREATE_NO_WINDOW gives the child an invisible console
+    // instead; the piped stderr below is unaffected.
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     // Piped (not null) so a failure can be explained to the UI instead of
