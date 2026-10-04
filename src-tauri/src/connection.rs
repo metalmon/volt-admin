@@ -49,6 +49,15 @@ pub struct Profile {
     pub panel_port: u16,
     pub auth: AuthMethod,
     pub key_path: Option<String>,
+    /// `[[authz.principals]]` id the auto-pairing code is bound to (an
+    /// administrator profile). Empty = `admin`.
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// Command run on the machine with voltd that prints a fresh pairing
+    /// code (`{panel_port}` / `{principal}` placeholders). Empty = the voltd
+    /// CLI default, see `crate::pair::paircode_command`.
+    #[serde(default)]
+    pub paircode_command: Option<String>,
 }
 
 #[cfg(test)]
@@ -67,10 +76,23 @@ mod tests {
             panel_port: 42627,
             auth: AuthMethod::Agent,
             key_path: None,
+            principal: None,
+            paircode_command: None,
         };
         let j = serde_json::to_string(&p).unwrap();
-        assert!(!j.contains("password"), "profile must never serialize a password");
+        assert!(
+            !j.contains("password"),
+            "profile must never serialize a password"
+        );
         let back: Profile = serde_json::from_str(&j).unwrap();
         assert_eq!(back.host, "h");
+    }
+
+    #[test]
+    fn older_profiles_without_pairing_fields_still_load() {
+        let j = r#"{"id":"a","name":"srv","mode":"local","host":"127.0.0.1","user":"","port":22,"panelPort":42617,"auth":"agent","keyPath":null}"#;
+        let p: Profile = serde_json::from_str(j).unwrap();
+        assert!(p.principal.is_none());
+        assert!(p.paircode_command.is_none());
     }
 }

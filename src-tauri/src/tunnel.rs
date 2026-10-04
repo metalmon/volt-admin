@@ -102,7 +102,10 @@ impl TunnelError {
     pub fn localize(&self, lang: Lang) -> String {
         match self {
             TunnelError::Io(e) => {
-                format!("{}: {e}", lang.pick("ошибка ввода-вывода туннеля", "tunnel I/O error"))
+                format!(
+                    "{}: {e}",
+                    lang.pick("ошибка ввода-вывода туннеля", "tunnel I/O error")
+                )
             }
             TunnelError::Timeout(detail) => {
                 let base = lang.pick(
@@ -134,7 +137,10 @@ impl TunnelError {
                 .to_string(),
             TunnelError::SshNotFound => ssh_not_found_hint(lang).to_string(),
             TunnelError::Embedded(detail) => {
-                format!("{}: {detail}", lang.pick("встроенный SSH-клиент", "built-in SSH client"))
+                format!(
+                    "{}: {detail}",
+                    lang.pick("встроенный SSH-клиент", "built-in SSH client")
+                )
             }
         }
     }
@@ -240,6 +246,11 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
+    /// True when the built-in client carries this tunnel (no exec path).
+    pub fn is_embedded(&self) -> bool {
+        self.embedded.is_some()
+    }
+
     /// Explicitly tear down the tunnel: kill the `ssh` child (system path) or
     /// abort the embedded forwarder, and remove the askpass helper, if any.
     /// Safe to call more than once.
@@ -306,18 +317,7 @@ pub async fn open_tunnel(
     // just a bare exit status — see `spawn_stderr_reader`.
     cmd.stderr(Stdio::piped());
 
-    let mut askpass_path = None;
-    if p.auth == AuthMethod::Password {
-        let pass = password.ok_or(TunnelError::MissingPassword)?;
-        let script = write_askpass_script(local_port)?;
-        // SSH_ASKPASS_REQUIRE=force (OpenSSH 8.4+) makes ssh use the
-        // askpass helper even without a DISPLAY / tty, which is what we
-        // want since stdin is Stdio::null() above.
-        cmd.env("SSH_ASKPASS_REQUIRE", "force");
-        cmd.env("SSH_ASKPASS", &script);
-        cmd.env("VOLT_SSH_PASSWORD", pass);
-        askpass_path = Some(script);
-    }
+    let askpass_path = attach_password(&mut cmd, p, password, local_port)?;
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -351,6 +351,82 @@ pub async fn open_tunnel(
         askpass_path,
         embedded: None,
     })
+}
+
+/// For `AuthMethod::Password`, wire the per-process askpass helper into
+/// `cmd` (see the module docs); returns the helper's path so the caller can
+/// remove it. `tag` only keeps concurrent helpers' file names apart.
+fn attach_password(
+    cmd: &mut Command,
+    p: &Profile,
+    password: Option<&str>,
+    tag: u16,
+) -> Result<Option<PathBuf>, TunnelError> {
+    if p.auth != AuthMethod::Password {
+        return Ok(None);
+    }
+    let pass = password.ok_or(TunnelError::MissingPassword)?;
+    let script = write_askpass_script(tag)?;
+    // SSH_ASKPASS_REQUIRE=force (OpenSSH 8.4+) makes ssh use the
+    // askpass helper even without a DISPLAY / tty, which is what we
+    // want since stdin is Stdio::null().
+    cmd.env("SSH_ASKPASS_REQUIRE", "force");
+    cmd.env("SSH_ASKPASS", &script);
+    cmd.env("VOLT_SSH_PASSWORD", pass);
+    Ok(Some(script))
+}
+
+/// `ssh` argument vector for running one command on the profile's host:
+/// the same connection options and auth as the tunnel, no forwarding.
+pub fn build_ssh_exec_args(p: &Profile, command: &str) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        p.port.to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=10".to_string(),
+    ];
+    if p.auth == AuthMethod::KeyFile {
+        if let Some(key) = &p.key_path {
+            args.push("-i".to_string());
+            args.push(key.clone());
+        }
+    }
+    args.push(format!("{}@{}", p.user, p.host));
+    args.push("--".to_string());
+    args.push(command.to_string());
+    args
+}
+
+/// Run `command` on the profile's host through the system `ssh` (same
+/// credentials as the tunnel) and return its combined stdout+stderr.
+pub async fn run_ssh_command(
+    p: &Profile,
+    password: Option<&str>,
+    command: &str,
+    timeout: Duration,
+    lang: Lang,
+) -> Result<String, String> {
+    let mut cmd = Command::new("ssh");
+    cmd.args(build_ssh_exec_args(p, command));
+    cmd.kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    // A distinct tag so the helper never collides with the tunnel's own.
+    let askpass_path = attach_password(&mut cmd, p, password, 0).map_err(|e| e.localize(lang))?;
+    let spawned = cmd.spawn().map_err(|e| format!("ssh: {e}"));
+    let result = match spawned {
+        Ok(child) => crate::pair::collect_output(child, timeout).await,
+        Err(e) => Err(e),
+    };
+    if let Some(path) = askpass_path {
+        let _ = std::fs::remove_file(path);
+    }
+    result
 }
 
 /// Whether to force the embedded (`russh`) client instead of the system `ssh`.
@@ -506,9 +582,7 @@ fn append_hint(e: TunnelError, hint: &str) -> TunnelError {
         TunnelError::ProcessExited(s, d) if d.is_empty() => {
             TunnelError::ProcessExited(s, hint.to_string())
         }
-        TunnelError::ProcessExited(s, d) => {
-            TunnelError::ProcessExited(s, format!("{d} ({hint})"))
-        }
+        TunnelError::ProcessExited(s, d) => TunnelError::ProcessExited(s, format!("{d} ({hint})")),
         other => other,
     }
 }
@@ -538,8 +612,11 @@ fn annotate_windows_password_hint(e: TunnelError, _p: &Profile, _lang: Lang) -> 
 #[cfg(unix)]
 fn write_askpass_script(local_port: u16) -> io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    let path =
-        std::env::temp_dir().join(format!("volt-admin-askpass-{}-{}.sh", std::process::id(), local_port));
+    let path = std::env::temp_dir().join(format!(
+        "volt-admin-askpass-{}-{}.sh",
+        std::process::id(),
+        local_port
+    ));
     std::fs::write(&path, b"#!/bin/sh\nprintf '%s' \"$VOLT_SSH_PASSWORD\"\n")?;
     let mut perms = std::fs::metadata(&path)?.permissions();
     perms.set_mode(0o700);
@@ -556,8 +633,11 @@ fn write_askpass_script(local_port: u16) -> io::Result<PathBuf> {
 // go through this helper and are unaffected.
 #[cfg(windows)]
 fn write_askpass_script(local_port: u16) -> io::Result<PathBuf> {
-    let path =
-        std::env::temp_dir().join(format!("volt-admin-askpass-{}-{}.cmd", std::process::id(), local_port));
+    let path = std::env::temp_dir().join(format!(
+        "volt-admin-askpass-{}-{}.cmd",
+        std::process::id(),
+        local_port
+    ));
     // Deliberately NOT `echo %VOLT_SSH_PASSWORD%`: cmd expands the variable
     // and then re-parses the resulting line, so a password containing
     // `&`/`|`/`^`/`<`/`>` would be interpreted as shell syntax rather than
@@ -590,6 +670,8 @@ mod tests {
             panel_port: 8080,
             auth: AuthMethod::Agent,
             key_path: None,
+            principal: None,
+            paircode_command: None,
         }
     }
 
@@ -671,7 +753,9 @@ mod tests {
             ..test_profile()
         };
         let raw = TunnelError::Timeout("Load key \"/k\": bad permissions".to_string());
-        let msg = annotate_error_hint(raw, &p, Lang::En).to_string().to_lowercase();
+        let msg = annotate_error_hint(raw, &p, Lang::En)
+            .to_string()
+            .to_lowercase();
         assert!(msg.contains("permission"));
         assert!(msg.contains("icacls") || msg.contains("chmod"));
     }

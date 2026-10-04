@@ -1,5 +1,6 @@
 mod commands;
 mod connection;
+mod pair;
 mod tunnel;
 mod tunnel_embedded;
 
@@ -27,6 +28,17 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(tunnel::TunnelState::default())
+        .manage(pair::PendingPair::default())
+        // Once the panel origin a `connect` navigated to has finished
+        // loading, run the queued pairing (or warning) script in it.
+        .on_page_load(|webview, payload| {
+            if payload.event() != tauri::webview::PageLoadEvent::Finished {
+                return;
+            }
+            if let Some(script) = webview.state::<pair::PendingPair>().take_for(payload.url()) {
+                let _ = webview.eval(&script);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,
             commands::save_profile,

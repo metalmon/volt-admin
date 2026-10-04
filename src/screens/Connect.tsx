@@ -29,6 +29,8 @@ export interface Profile {
   panelPort: number
   auth: AuthMethod
   keyPath: string | null
+  principal: string | null
+  paircodeCommand: string | null
 }
 
 const DEFAULT_PANEL_PORT = 42627
@@ -45,6 +47,8 @@ const emptyDraft = (): Draft => ({
   panelPort: DEFAULT_PANEL_PORT,
   auth: 'agent',
   keyPath: null,
+  principal: null,
+  paircodeCommand: null,
 })
 
 // i18n keys for the enum display labels. The `AuthMethod` / `ConnMode` values
@@ -175,7 +179,13 @@ export default function Connect() {
       // The `connect` command navigates the main window's webview
       // top-level to the panel once it resolves — there is nothing further
       // to do here on success (this screen is about to be replaced).
-      await invoke('connect', { profile, password, lang })
+      // The result's `pairWarning` is also shown by the app inside the panel
+      // (a dismissable banner), since this screen is about to be replaced.
+      await invoke<{ baseUrl: string; pairWarning: string | null }>('connect', {
+        profile,
+        password,
+        lang,
+      })
       setPasswordPromptId(null)
       setPasswordValue('')
     } catch (e) {
@@ -432,6 +442,34 @@ export default function Connect() {
                     setDraft((d) => ({ ...d, panelPort: v }))
                   }}
                 />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-principal">{t('field.principal')}</Label>
+                <Input
+                  id="profile-principal"
+                  placeholder="admin"
+                  value={draft.principal ?? ''}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value
+                    setDraft((d) => ({ ...d, principal: v || null }))
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">{t('field.principal.hint')}</p>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-paircode-command">{t('field.paircodeCommand')}</Label>
+                <Input
+                  id="profile-paircode-command"
+                  placeholder={`voltd gateway get-paircode --new --port ${draft.panelPort} --principal ${draft.principal || 'admin'}`}
+                  value={draft.paircodeCommand ?? ''}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value
+                    setDraft((d) => ({ ...d, paircodeCommand: v || null }))
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">{t('field.paircodeCommand.hint')}</p>
               </div>
 
               {/* Fluent: form action row lives at the bottom-right, primary

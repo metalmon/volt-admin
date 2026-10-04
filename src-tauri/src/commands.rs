@@ -5,7 +5,9 @@
 //! password is ever stored — see `crate::connection` for why.
 
 use crate::connection::{ConnMode, Profile};
+use crate::pair::{self, PendingPair};
 use crate::tunnel::{self, Lang, TunnelState};
+use serde::Serialize;
 use tauri::{command, AppHandle, Manager, Runtime, State};
 use tauri_plugin_store::StoreExt;
 
@@ -93,9 +95,19 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     persist_profiles(&app, &profiles)
 }
 
+/// What `connect` hands back to the Connect screen.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectResult {
+    pub base_url: String,
+    /// Why automatic pairing did not happen (the panel then shows its own
+    /// pairing prompt); `None` when a code was minted.
+    pub pair_warning: Option<String>,
+}
+
 /// Connect to a profile's `voltd` runtime, navigate the main window's
 /// webview top-level to the panel (see `navigate_main_window`), and return
-/// the panel's base URL.
+/// the panel's base URL plus the auto-pairing outcome.
 ///
 /// - `Local` mode never opens a tunnel: it uses the direct panel URL.
 /// - `Remote` mode opens an SSH `-L` tunnel (tearing down any previously
@@ -110,7 +122,7 @@ pub async fn connect<R: Runtime>(
     password: Option<String>,
     lang: Option<String>,
     tunnel_state: State<'_, TunnelState>,
-) -> Result<String, String> {
+) -> Result<ConnectResult, String> {
     // UI language for any user-facing tunnel error (RU-first default).
     let lang = Lang::from_code(lang.as_deref());
     let mut guard = tunnel_state.0.lock().await;
@@ -121,6 +133,7 @@ pub async fn connect<R: Runtime>(
     // `endpoint` (IP:port) feeds the OS window title so the copy shows which
     // instance it is connected to. Local = the direct 127.0.0.1:panel_port;
     // Remote = the actual remote host:panel_port (not the local tunnel port).
+    let mut embedded = false;
     let (base_url, endpoint) = match profile.mode {
         ConnMode::Local => (
             format!("http://127.0.0.1:{}", profile.panel_port),
@@ -131,11 +144,38 @@ pub async fn connect<R: Runtime>(
                 .await
                 .map_err(|e| e.localize(lang))?;
             let url = format!("http://127.0.0.1:{}", tun.local_port);
+            embedded = tun.is_embedded();
             *guard = Some(tun);
             (url, format!("{}:{}", profile.host, profile.panel_port))
         }
     };
     drop(guard);
+
+    // Mint a one-time pairing code on the gateway machine and queue the
+    // panel-side redeem for when the panel has loaded (see `crate::pair`).
+    // A failure here is informational: the panel still opens with its own
+    // pairing prompt.
+    let pair_warning = match pair::mint_code(&profile, password.as_deref(), embedded, lang).await {
+        Ok(code) => {
+            if let Some(origin) = pair::origin_of(&base_url) {
+                app.state::<PendingPair>()
+                    .set(origin, pair::pair_script(&code));
+            }
+            None
+        }
+        Err(reason) => {
+            eprintln!("[volt-admin] auto-pair unavailable: {reason}");
+            if let Some(origin) = pair::origin_of(&base_url) {
+                let text = match lang {
+                    Lang::Ru => format!("Автосопряжение не выполнено: {reason}"),
+                    Lang::En => format!("Auto-pairing skipped: {reason}"),
+                };
+                app.state::<PendingPair>()
+                    .set(origin, pair::warning_script(&text));
+            }
+            Some(reason)
+        }
+    };
 
     // Capture the app-entry URL (the Connect screen the webview is currently
     // showing) before we navigate away, so `disconnect` knows where to go
@@ -159,7 +199,10 @@ pub async fn connect<R: Runtime>(
         let _ = window.set_title(&format!("{} ({}) — Вольт Админ", profile.name, endpoint));
     }
 
-    Ok(base_url)
+    Ok(ConnectResult {
+        base_url,
+        pair_warning,
+    })
 }
 
 /// Tear down the active tunnel (if any) and navigate the main window's

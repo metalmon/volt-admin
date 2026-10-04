@@ -112,13 +112,15 @@ pub async fn open_embedded_tunnel(
         port: p.port,
     };
 
-    let tcp = TcpStream::connect((p.host.as_str(), p.port)).await.map_err(|e| {
-        emb(
-            lang,
-            format!("не удалось подключиться к {}:{} — {e}", p.host, p.port),
-            format!("could not connect to {}:{} — {e}", p.host, p.port),
-        )
-    })?;
+    let tcp = TcpStream::connect((p.host.as_str(), p.port))
+        .await
+        .map_err(|e| {
+            emb(
+                lang,
+                format!("не удалось подключиться к {}:{} — {e}", p.host, p.port),
+                format!("could not connect to {}:{} — {e}", p.host, p.port),
+            )
+        })?;
 
     let mut session = client::connect_stream(config, tcp, handler)
         .await
@@ -284,6 +286,8 @@ mod tests {
             panel_port: 42617,
             auth,
             key_path: None,
+            principal: None,
+            paircode_command: None,
         }
     }
 
