@@ -99,13 +99,10 @@ pub fn principal(p: &Profile) -> String {
     }
 }
 
-/// The command that prints a fresh pairing code on the machine with voltd.
-///
-/// The default reaches voltd wherever it runs on that machine: a `voltd`
-/// on PATH (native install, running as the SSH user) or, failing that, the
-/// pilot kit's container (`docker exec voltd ...`, whose private listener is
-/// always 42617 inside). A Windows machine in `Local` mode has no POSIX
-/// shell, so there the native form is used as is.
+/// The command that prints a fresh pairing code. It runs where voltd lives
+/// (the SSH target in `Remote` mode, this machine in `Local` mode); in the
+/// pilot kit the SSH target is the voltd deployment itself, so the plain
+/// `voltd` CLI is on PATH there. Empty = the voltd CLI default.
 pub fn paircode_command(p: &Profile) -> String {
     if let Some(cmd) = p.paircode_command.as_deref().map(str::trim) {
         if !cmd.is_empty() {
@@ -114,19 +111,11 @@ pub fn paircode_command(p: &Profile) -> String {
                 .replace("{principal}", &principal(p));
         }
     }
-    let principal = principal(p);
-    let native = format!(
-        "voltd gateway get-paircode --new --port {} --principal {principal}",
-        p.panel_port
-    );
-    let docker = format!(
-        "docker exec voltd voltd --config-dir /voltd-data/.voltd gateway get-paircode --new --port 42617 --principal {principal}"
-    );
-    if p.mode == ConnMode::Local && cfg!(windows) {
-        native
-    } else {
-        format!("if command -v voltd >/dev/null 2>&1; then {native}; else {docker}; fi")
-    }
+    format!(
+        "voltd gateway get-paircode --new --port {} --principal {}",
+        p.panel_port,
+        principal(p)
+    )
 }
 
 /// Mint a pairing code on the gateway machine. `embedded` = the tunnel runs
@@ -254,7 +243,8 @@ pub fn js_str(s: &str) -> String {
 /// nothing happens; without one, navigate to `/?volt_pair=1` to ask the app
 /// for a code. A page already carrying the marker is left alone so a failed
 /// mint cannot loop — the panel's own pairing prompt stays usable there.
-pub const PROBE_SCRIPT: &str = "(function(){try{var K='zeroclaw_token';if(localStorage.getItem(K))return;\
+pub const PROBE_SCRIPT: &str =
+    "(function(){try{var K='zeroclaw_token';if(localStorage.getItem(K))return;\
 if(location.search.indexOf('volt_pair=1')>=0)return;\
 location.replace('/?volt_pair=1');}catch(e){}})();";
 
@@ -333,10 +323,9 @@ mod tests {
 
     #[test]
     fn default_command_targets_the_panel_port_and_admin_principal() {
-        let remote = paircode_command(&profile());
-        assert!(
-            remote.starts_with("if command -v voltd >/dev/null 2>&1; then voltd gateway get-paircode --new --port 42617 --principal admin; else docker exec voltd voltd --config-dir /voltd-data/.voltd gateway get-paircode --new --port 42617 --principal admin; fi"),
-            "got: {remote}"
+        assert_eq!(
+            paircode_command(&profile()),
+            "voltd gateway get-paircode --new --port 42617 --principal admin"
         );
         let mut p = profile();
         p.principal = Some(" ops ".into());
