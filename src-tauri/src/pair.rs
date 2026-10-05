@@ -10,7 +10,7 @@
 //! public `POST /api/pair` exactly as a person typing it would.
 //!
 //! The panel's own "connect a new device" button needs that same admin token
-//! (`x-zeroclaw-admin-token` on `POST /admin/paircode/new`), which a browser
+//! (`x-voltd-admin-token` on `POST /admin/paircode/new`), which a browser
 //! never has. This app is authenticated on the gateway machine, so `connect`
 //! reads `<config-dir>/data/gateway-admin.token` there (`fetch_admin_token`)
 //! and keeps it in the `PairContext` — memory only, cleared on disconnect,
@@ -210,7 +210,7 @@ pub fn validate_token(raw: &str) -> Option<String> {
 }
 
 /// Evaluated on every load of the panel origin when a token is held: the
-/// panel adds `x-zeroclaw-admin-token` to its pair-code requests when this
+/// panel adds `x-voltd-admin-token` to its pair-code requests when this
 /// global exists.
 pub fn token_script(token: &str) -> String {
     format!("window.__voltAdminToken = '{}';", js_str(token))
