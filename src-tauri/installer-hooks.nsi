@@ -24,22 +24,29 @@
 
 !include LogicLib.nsh
 
+; VOLT_RENAME_SHORTCUT <dir>: if "<dir>\${PRODUCTNAME}.lnk" exists, recreate it as
+; "<dir>\Вольт Админ.lnk" with the same target and delete the Latin original.
+!macro VOLT_RENAME_SHORTCUT DIR
+  ${If} ${FileExists} "${DIR}\${PRODUCTNAME}.lnk"
+    CreateShortcut "${DIR}\Вольт Админ.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Delete "${DIR}\${PRODUCTNAME}.lnk"
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   ; "Программы и компоненты" (ARP) label — key path stays ...\Uninstall\Volt Admin
   WriteRegStr SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}" "DisplayName" "Вольт Админ"
-  ; Rename the Latin shortcuts Tauri just created -> Cyrillic label, same target
-  ${If} ${FileExists} "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
-    CreateShortcut "$SMPROGRAMS\$AppStartMenuFolder\Вольт Админ.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
-    Delete "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
-  ${EndIf}
-  ${If} ${FileExists} "$DESKTOP\${PRODUCTNAME}.lnk"
-    CreateShortcut "$DESKTOP\Вольт Админ.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
-    Delete "$DESKTOP\${PRODUCTNAME}.lnk"
-  ${EndIf}
+  ; Rename the Latin shortcuts Tauri just created -> Cyrillic label, same target.
+  ; Tauri puts the Start-menu shortcut directly in $SMPROGRAMS unless a
+  ; startMenuFolder is configured, so both locations are handled.
+  !insertmacro VOLT_RENAME_SHORTCUT "$SMPROGRAMS"
+  !insertmacro VOLT_RENAME_SHORTCUT "$SMPROGRAMS\$AppStartMenuFolder"
+  !insertmacro VOLT_RENAME_SHORTCUT "$DESKTOP"
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; The stock uninstaller only deletes "${PRODUCTNAME}.lnk"; remove our renamed ones too
+  Delete "$SMPROGRAMS\Вольт Админ.lnk"
   Delete "$SMPROGRAMS\$AppStartMenuFolder\Вольт Админ.lnk"
   Delete "$DESKTOP\Вольт Админ.lnk"
 !macroend
