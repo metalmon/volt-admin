@@ -153,7 +153,7 @@ pub async fn open_embedded_tunnel(
     // Bind the local end (the profile's stable port, so the panel origin and
     // its stored session survive reconnects) and start forwarding. The
     // listener is kept, so there is no pick-then-bind race here.
-    let listener = crate::tunnel::bind_stable_listener(&p.id)
+    let listener = crate::tunnel::requested_local_listener(p)
         .and_then(|l| {
             l.set_nonblocking(true)?;
             TcpListener::from_std(l)

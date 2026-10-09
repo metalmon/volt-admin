@@ -27,6 +27,7 @@ export interface Profile {
   user: string
   port: number
   panelPort: number
+  localPort: number | null
   auth: AuthMethod
   keyPath: string | null
   principal: string | null
@@ -45,6 +46,7 @@ const emptyDraft = (): Draft => ({
   user: '',
   port: DEFAULT_SSH_PORT,
   panelPort: DEFAULT_PANEL_PORT,
+  localPort: null,
   auth: 'agent',
   keyPath: null,
   principal: null,
@@ -180,11 +182,20 @@ export default function Connect() {
       // top-level to the panel once it resolves — there is nothing further
       // to do here on success (this screen is about to be replaced). Pairing
       // happens lazily inside the panel afterwards (see src-tauri/src/pair.rs).
-      await invoke<{ baseUrl: string }>('connect', {
-        profile,
-        password,
-        lang,
-      })
+      // Guard against a command that never settles so the connect button can
+      // never spin forever: after 90s the promise is rejected and the error is
+      // shown (the underlying command, if it later resolves, navigates the
+      // window on its own — see commands::connect).
+      await Promise.race([
+        invoke<{ baseUrl: string }>('connect', {
+          profile,
+          password,
+          lang,
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(t('err.connectTimeout'))), 90_000),
+        ),
+      ])
       setPasswordPromptId(null)
       setPasswordValue('')
     } catch (e) {
@@ -441,6 +452,22 @@ export default function Connect() {
                     setDraft((d) => ({ ...d, panelPort: v }))
                   }}
                 />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-local-port">{t('field.localPort')}</Label>
+                <Input
+                  id="profile-local-port"
+                  type="number"
+                  placeholder={t('field.localPort.ph')}
+                  value={draft.localPort ?? ''}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value
+                    const n = Number(v)
+                    setDraft((d) => ({ ...d, localPort: v === '' ? null : Number.isNaN(n) ? null : n }))
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">{t('field.localPort.hint')}</p>
               </div>
 
               <div className="flex flex-col gap-1.5">

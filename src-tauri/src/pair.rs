@@ -36,6 +36,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::connection::{ConnMode, Profile};
+use crate::logx;
 use crate::tunnel::{self, Lang};
 
 /// Principal the code is bound to when the profile leaves it empty. The pilot
@@ -139,6 +140,7 @@ pub async fn mint_code(
     lang: Lang,
 ) -> Result<String, String> {
     let command = paircode_command(p);
+    logx::log("pair", &format!("mint_code start mode={:?} embedded={embedded} cmd={command}", p.mode));
     let output = match p.mode {
         ConnMode::Local => run_local(&command).await?,
         ConnMode::Remote if embedded => {
@@ -157,7 +159,12 @@ pub async fn mint_code(
             tunnel::run_ssh_command(p, password, &command, EXEC_TIMEOUT, lang).await?
         }
     };
-    extract_pair_code(&output).ok_or_else(|| {
+    let code = extract_pair_code(&output);
+    match &code {
+        Some(_) => logx::log("pair", "mint_code ok (code extracted)"),
+        None => logx::log("pair", &format!("mint_code NO CODE in output: {}", tail_of(&output, 200))),
+    }
+    code.ok_or_else(|| {
         let tail = tail_of(&output, 160);
         match lang {
             Lang::Ru => format!("команда кода сопряжения не вернула код: {tail}"),
@@ -166,11 +173,21 @@ pub async fn mint_code(
     })
 }
 
-/// Prints the gateway admin token on the gateway machine (`Remote` mode): the
-/// kit container exports `ZEROCLAW_CONFIG_DIR`, a native install keeps it
-/// under `~/.zeroclaw`.
-const TOKEN_COMMAND: &str =
-    "cat \"${ZEROCLAW_CONFIG_DIR:-$HOME/.zeroclaw}/data/gateway-admin.token\"";
+/// Prints the gateway admin token on the gateway machine (`Remote` mode). The
+/// token lives in `<config-dir>/data/gateway-admin.token`, but the config dir
+/// is not always discoverable over a bare SSH exec: the kit container runs
+/// `daemon --config-dir /voltd-data/.voltd` and does NOT export
+/// `ZEROCLAW_CONFIG_DIR`, while a native install keeps it at
+/// `~/.zeroclaw`. So probe every plausible location and fall back to a bounded
+/// `find`. Prints nothing (non-zero) when the token cannot be located.
+const TOKEN_COMMAND: &str = concat!(
+    "for d in \"$ZEROCLAW_CONFIG_DIR\" \"$VOLTD_CONFIG_DIR\" \"$HOME/.zeroclaw\" ",
+    "/voltd-data/.voltd; do ",
+    "[ -n \"$d\" ] && [ -f \"$d/data/gateway-admin.token\" ] && ",
+    "{ cat \"$d/data/gateway-admin.token\"; exit 0; }; done; ",
+    "f=$(find / -name gateway-admin.token 2>/dev/null | head -n1); ",
+    "[ -n \"$f\" ] && cat \"$f\""
+);
 
 /// Read the gateway admin token from where voltd lives (this machine in
 /// `Local` mode, the SSH target in `Remote` mode). The error is for the log

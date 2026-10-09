@@ -5,6 +5,7 @@
 //! password is ever stored — see `crate::connection` for why.
 
 use crate::connection::{ConnMode, Profile};
+use crate::logx;
 use crate::pair::{self, PairContext, PairState};
 use crate::tunnel::{self, Lang, TunnelState};
 use serde::Serialize;
@@ -123,31 +124,93 @@ pub async fn connect<R: Runtime>(
 ) -> Result<ConnectResult, String> {
     // UI language for any user-facing tunnel error (RU-first default).
     let lang = Lang::from_code(lang.as_deref());
-    let mut guard = tunnel_state.0.lock().await;
-    // A new connect attempt supersedes whatever was active before;
-    // dropping the old value (if any) kills its ssh child.
-    *guard = None;
+    logx::log(
+        "connect",
+        &format!(
+            "start mode={:?} host={} user={} port={} panel_port={} auth={:?} principal={:?} paircodeCommand={:?} id={}",
+            profile.mode,
+            profile.host,
+            profile.user,
+            profile.port,
+            profile.panel_port,
+            profile.auth,
+            profile.principal,
+            profile.paircode_command,
+            profile.id
+        ),
+    );
+    {
+        // A new connect attempt supersedes whatever was active before;
+        // dropping the old value (if any) kills its ssh child. The lock is
+        // released right away: opening the tunnel must not hold it (a wedged
+        // previous attempt would otherwise block every retry forever).
+        let mut guard = tunnel_state.0.lock().await;
+        *guard = None;
+    }
+    logx::log("connect", "old tunnel cleared, lock released");
 
     // `endpoint` (IP:port) feeds the OS window title so the copy shows which
     // instance it is connected to. Local = the direct 127.0.0.1:panel_port;
     // Remote = the actual remote host:panel_port (not the local tunnel port).
     let mut embedded = false;
+    let mut tunnel_opt: Option<tunnel::Tunnel> = None;
     let (base_url, endpoint) = match profile.mode {
         ConnMode::Local => (
             format!("http://127.0.0.1:{}", profile.panel_port),
             format!("127.0.0.1:{}", profile.panel_port),
         ),
         ConnMode::Remote => {
-            let tun = tunnel::open_tunnel(&profile, password.as_deref(), lang)
-                .await
-                .map_err(|e| e.localize(lang))?;
+            let started = std::time::Instant::now();
+            let fut = tunnel::open_tunnel(&profile, password.as_deref(), lang);
+            // Hard cap: a wedged ssh child must never hold this connect for
+            // ever (the frontend already guards at 90 s, this keeps the Rust
+            // side clean and releases the process structure either way).
+            let tun = match tokio::time::timeout(std::time::Duration::from_secs(30), fut).await {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    logx::log(
+                        "connect",
+                        &format!(
+                            "open_tunnel FAILED after {} ms: {}",
+                            started.elapsed().as_millis(),
+                            e
+                        ),
+                    );
+                    return Err(e.localize(lang));
+                }
+                Err(_) => {
+                    logx::log(
+                        "connect",
+                        "open_tunnel HARD TIMEOUT (30 s hard cap hit)",
+                    );
+                    return Err(match lang {
+                        Lang::Ru => "открытие SSH-туннеля зависло (жёсткий таймаут 30 с)".to_string(),
+                        Lang::En => "SSH tunnel setup hung (hard 30 s timeout)".to_string(),
+                    });
+                }
+            };
+            logx::log(
+                "connect",
+                &format!(
+                    "open_tunnel ok local_port={} embedded={} elapsed_ms={}",
+                    tun.local_port,
+                    tun.is_embedded(),
+                    started.elapsed().as_millis()
+                ),
+            );
             let url = format!("http://127.0.0.1:{}", tun.local_port);
             embedded = tun.is_embedded();
-            *guard = Some(tun);
+            tunnel_opt = Some(tun);
             (url, format!("{}:{}", profile.host, profile.panel_port))
         }
     };
-    drop(guard);
+    // Publish the tunnel only after it is fully usable; the lock is taken for
+    // a split second here, never held across the fallible connection setup.
+    if let Some(tun) = tunnel_opt {
+        let mut guard = tunnel_state.0.lock().await;
+        *guard = Some(tun);
+    }
+    logx::log("connect", "tunnel published");
 
     // The gateway admin token for the panel's own "connect a new device"
     // button (see `crate::pair`). Failure just means no token; the panel then
@@ -157,9 +220,11 @@ pub async fn connect<R: Runtime>(
             Ok(token) => Some(token),
             Err(reason) => {
                 eprintln!("[volt-admin] gateway admin token unavailable: {reason}");
+                logx::log("connect", &format!("admin_token none: {reason}"));
                 None
             }
         };
+    logx::log("connect", &format!("admin_token is_some={}", admin_token.is_some()));
 
     // Remember what a pairing code for this connection would need, so the
     // page-load hook can mint one on demand (see `crate::pair::PairContext`
@@ -190,6 +255,7 @@ pub async fn connect<R: Runtime>(
     // is only the static-asset prefix — requesting it bare returns 400 by
     // design (see the gateway's static_files handler), so navigate to `/`.
     let panel_url = format!("{}/", base_url.trim_end_matches('/'));
+    logx::log("connect", &format!("navigate to {panel_url}"));
     let url = tauri::Url::parse(&panel_url).map_err(|e| e.to_string())?;
     navigate_main_window(&app, url)?;
 
@@ -198,6 +264,7 @@ pub async fn connect<R: Runtime>(
         let _ = window.set_title(&format!("{} ({}) — Вольт Админ", profile.name, endpoint));
     }
 
+    logx::log("connect", "done");
     Ok(ConnectResult { base_url })
 }
 

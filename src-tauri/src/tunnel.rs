@@ -31,11 +31,158 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::connection::{AuthMethod, Profile};
+use crate::logx;
+
+/// Reap a spawned `ssh` even when this app dies by a *hard* kill (`Stop-Process
+/// -Force`, `taskkill /F`, `kill -9`) that never runs Rust's `Drop`:
+///
+/// * **Windows** — the child joins a Job Object with
+///   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; when the app process ends, the OS
+///   kills every process in the job.
+/// * **Linux** — the child arms `PR_SET_PDEATHSIG` before exec, so the kernel
+///   `SIGKILL`s it the moment its parent dies (the direct analogue of the Job
+///   Object).
+/// * **Other Unix (macOS/BSD)** — the kernel exposes no parent-death signal,
+///   so a hard kill of the app can still orphan `ssh`; a clean exit and the
+///   `Drop`/`close` path are covered by `kill_on_drop` regardless.
+mod child_guard {
+    /// Called while building the child's `Command`, before it is spawned.
+    pub fn configure(cmd: &mut tokio::process::Command) {
+        #[cfg(unix)]
+        unix_configure(cmd);
+        #[cfg(not(unix))]
+        let _ = cmd;
+    }
+
+    /// Called once the child is running (after `spawn`).
+    pub fn assign(pid: Option<u32>) {
+        #[cfg(windows)]
+        windows_assign(pid);
+        #[cfg(not(windows))]
+        let _ = pid;
+    }
+
+    /// No-op except on macOS, where the kernel offers no parent-death signal
+    /// (unlike Linux's `PR_SET_PDEATHSIG` or the Windows Job Object). There we
+    /// spawn a detached `/bin/sh` watchdog that watches its own parent and, the
+    /// moment this app is gone, `SIGKILL`s the `ssh` child — covering even a
+    /// `kill -9` of the app. The returned child is killed on a clean teardown.
+    #[cfg(not(target_os = "macos"))]
+    pub fn watchdog(_ssh_pid: Option<u32>) -> Option<tokio::process::Child> {
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn watchdog(ssh_pid: Option<u32>) -> Option<tokio::process::Child> {
+        use std::process::Stdio;
+
+        let ssh_pid = ssh_pid?;
+        // `$PPID` is captured once (this app's pid). The loop exits when our
+        // own parent changes — i.e. we were re-parented because the app died —
+        // which cannot be fooled by pid reuse the way a `kill -0 <apppid>`
+        // test could. Then we kill the tunnel child.
+        let script = format!(
+            "p=$PPID; while [ \"$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')\" = \"$p\" ]; do sleep 1; done; kill -KILL {ssh_pid} 2>/dev/null"
+        );
+        let spawned = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => {
+                logx::log(
+                    "tunnel",
+                    &format!("macos watchdog pid={:?} watching ssh {ssh_pid}", child.id()),
+                );
+                Some(child)
+            }
+            Err(e) => {
+                logx::log("tunnel", &format!("macos watchdog spawn failed: {e}"));
+                None
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_configure(cmd: &mut tokio::process::Command) {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            cmd.pre_exec(|| {
+                // Best-effort: if the kernel can't arm the death signal we
+                // still let `ssh` start (kill_on_drop is the backstop).
+                let _ = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = cmd;
+    }
+
+    #[cfg(windows)]
+    fn windows_assign(pid: Option<u32>) {
+        use std::sync::OnceLock;
+
+        use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+
+        static JOB: OnceLock<usize> = OnceLock::new();
+
+        // The process-wide job handle, created on first use; 0 = unavailable.
+        let job = *JOB.get_or_init(|| unsafe {
+            let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if h.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                h,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                let _ = CloseHandle(h);
+                return 0;
+            }
+            h as usize
+        });
+        if job == 0 {
+            return;
+        }
+        let Some(pid) = pid else { return };
+        // Best-effort: a failure (e.g. the child already belongs to a
+        // non-breakaway job) is ignored.
+        unsafe {
+            let proc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, pid);
+            if proc.is_null() {
+                return;
+            }
+            let _ = AssignProcessToJobObject(job as HANDLE, proc);
+            let _ = CloseHandle(proc);
+        }
+    }
+}
+
 
 /// How long `open_tunnel` waits for the forwarded port to accept a TCP
 /// connection before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Upper bound on a single liveness probe against the forwarded port. Kept
+/// well under `POLL_INTERVAL`-scale so a not-yet-listening port is retried
+/// promptly even where a dropped SYN would otherwise hang the connect.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Win32 `CREATE_NO_WINDOW` process-creation flag: run a console child
 /// without a visible console window. Must be set on every process this app
@@ -244,6 +391,9 @@ pub struct Tunnel {
     /// aborting it tears the forwarding down. Exactly one of `child` /
     /// `embedded` is populated.
     embedded: Option<crate::tunnel_embedded::EmbeddedTunnel>,
+    /// `Some` only on macOS: a detached `/bin/sh` watchdog that kills the
+    /// `ssh` child if this app dies by a hard kill (see `child_guard`).
+    watchdog: Option<Child>,
 }
 
 impl Tunnel {
@@ -259,6 +409,10 @@ impl Tunnel {
         if let Some(mut child) = self.child.take() {
             // Best-effort: the child may have already exited on its own.
             let _ = child.start_kill();
+        }
+        if let Some(mut watchdog) = self.watchdog.take() {
+            // macOS only; harmless no-op elsewhere (always `None`).
+            let _ = watchdog.start_kill();
         }
         if let Some(path) = self.askpass_path.take() {
             let _ = std::fs::remove_file(path);
@@ -302,7 +456,7 @@ pub async fn open_tunnel(
 
     // Bind-then-release: ssh binds the same port right after (see
     // `bind_stable_listener` for the TOCTOU note).
-    let local_port = bind_stable_listener(&p.id)?.local_addr()?.port();
+    let local_port = requested_local_listener(p)?.local_addr()?.port();
     let args = build_ssh_args(p, local_port);
 
     let mut cmd = Command::new("ssh");
@@ -320,10 +474,26 @@ pub async fn open_tunnel(
     // just a bare exit status — see `spawn_stderr_reader`.
     cmd.stderr(Stdio::piped());
 
+    logx::log(
+        "tunnel",
+        &format!(
+            "open_tunnel start local_port={local_port} user={} host={} host_port={} force_embedded={}",
+            p.user, p.host, p.port, force_embedded()
+        ),
+    );
+
     let askpass_path = attach_password(&mut cmd, p, password, local_port)?;
 
+    // Arm the parent-death guard where the OS supports one (Linux) before the
+    // child execs; Windows is handled after `spawn` via a Job Object.
+    child_guard::configure(&mut cmd);
+
     let mut child = match cmd.spawn() {
-        Ok(child) => child,
+        Ok(child) => {
+            logx::log("tunnel", &format!("ssh spawned pid={:?}", child.id()));
+            child_guard::assign(child.id());
+            child
+        }
         Err(e) => {
             // Spawn failed (commonly: no `ssh` on PATH). Drop the askpass
             // helper we may have written before returning.
@@ -333,26 +503,37 @@ pub async fn open_tunnel(
             // No system `ssh`? Fall back to the built-in client so an
             // unprepared machine can still connect.
             if e.kind() == io::ErrorKind::NotFound {
+                logx::log("tunnel", "spawn NotFound -> embedded fallback");
                 return open_embedded_as_tunnel(p, password, lang).await;
             }
+            logx::log("tunnel", &format!("spawn error: {e}"));
             return Err(map_spawn_error(e));
         }
     };
     let stderr_buf = child.stderr.take().map(spawn_stderr_reader);
+    // macOS only (no kernel parent-death signal there): a watchdog that kills
+    // `ssh` if this app is hard-killed before `wait_for_forward` returns.
+    let mut watchdog = child_guard::watchdog(child.id());
 
     if let Err(e) = wait_for_forward(local_port, &mut child, stderr_buf.as_ref()).await {
         let _ = child.start_kill();
+        if let Some(mut w) = watchdog.take() {
+            let _ = w.start_kill();
+        }
         if let Some(path) = askpass_path {
             let _ = std::fs::remove_file(path);
         }
+        logx::log("tunnel", &format!("wait_for_forward FAILED local_port={local_port}: {e}"));
         return Err(annotate_error_hint(e, p, lang));
     }
+    logx::log("tunnel", &format!("wait_for_forward ok local_port={local_port}"));
 
     Ok(Tunnel {
         child: Some(child),
         local_port,
         askpass_path,
         embedded: None,
+        watchdog,
     })
 }
 
@@ -422,10 +603,24 @@ pub async fn run_ssh_command(
     // A distinct tag so the helper never collides with the tunnel's own.
     let askpass_path = attach_password(&mut cmd, p, password, 0).map_err(|e| e.localize(lang))?;
     let spawned = cmd.spawn().map_err(|e| format!("ssh: {e}"));
+    let started = std::time::Instant::now();
     let result = match spawned {
         Ok(child) => crate::pair::collect_output(child, timeout).await,
         Err(e) => Err(e),
     };
+    let tail: String = result
+        .as_ref()
+        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|e| e.clone());
+    let tail: String = tail.chars().take(160).collect();
+    logx::log(
+        "tunnel",
+        &format!(
+            "run_ssh_command elapsed_ms={} result={} tail={tail}",
+            started.elapsed().as_millis(),
+            if result.is_ok() { "ok" } else { "err" }
+        ),
+    );
     if let Some(path) = askpass_path {
         let _ = std::fs::remove_file(path);
     }
@@ -454,6 +649,7 @@ async fn open_embedded_as_tunnel(
         local_port: embedded.local_port,
         askpass_path: None,
         embedded: Some(embedded),
+        watchdog: None,
     })
 }
 
@@ -477,19 +673,45 @@ pub fn preferred_port(profile_id: &str) -> u16 {
     PORT_BASE + (h % u32::from(PORT_SPAN)) as u16
 }
 
+/// Bind a listener starting at `first`, then the next `PORT_TRIES` ports, and
+/// finally any ephemeral port. Used by both the stable and requested paths.
+fn bind_from(first: u16, log_fallback: bool) -> io::Result<std::net::TcpListener> {
+    for port in first..first.saturating_add(PORT_TRIES) {
+        if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", port)) {
+            if log_fallback && port != first {
+                logx::log(
+                    "tunnel",
+                    &format!("local port {first} busy, using {port} instead"),
+                );
+            }
+            return Ok(l);
+        }
+    }
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+}
+
 /// Bind a loopback listener on the profile's stable port, or the next free
 /// one after it, or (last resort) any ephemeral port. The system-`ssh` path
 /// reads the port and drops the listener so `ssh` can bind it — an inherent
 /// (small) TOCTOU race, acceptable for a single-user desktop tool; the
 /// embedded path keeps the listener.
 pub fn bind_stable_listener(profile_id: &str) -> io::Result<std::net::TcpListener> {
-    let first = preferred_port(profile_id);
-    for port in first..first.saturating_add(PORT_TRIES) {
-        if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", port)) {
-            return Ok(l);
-        }
+    bind_from(preferred_port(profile_id), false)
+}
+
+/// Bind the loopback listener for a profile's tunnel: the user-requested
+/// `local_port` when set, else the stable per-profile port (see
+/// `bind_stable_listener`). The `local_port` on the Windows side is
+/// deliberately independent from the remote `panel_port` on the daemon.
+///
+/// The requested port is only a starting point: if it is busy, the next few
+/// ports are tried and finally an ephemeral one is used, so a leftover ssh
+/// from a crashed run can never wedge the connection. A fallback is logged.
+pub fn requested_local_listener(p: &Profile) -> io::Result<std::net::TcpListener> {
+    match p.local_port {
+        None => bind_stable_listener(&p.id),
+        Some(first) => bind_from(first, true),
     }
-    std::net::TcpListener::bind(("127.0.0.1", 0))
 }
 
 /// Poll the forwarded local port until it accepts a TCP connection, the
@@ -500,17 +722,49 @@ async fn wait_for_forward(
     stderr_buf: Option<&StderrBuf>,
 ) -> Result<(), TunnelError> {
     let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let started = Instant::now();
+    let mut ticks: u32 = 0;
     loop {
-        if let Some(status) = child.try_wait()? {
+        ticks += 1;
+        let status = child.try_wait()?;
+        if let Some(status) = status {
+            logx::log(
+                "tunnel",
+                &format!("wait_for_forward child-exited tick={ticks} status={status}"),
+            );
             return Err(TunnelError::ProcessExited(
                 status,
                 stderr_snapshot(stderr_buf).await,
             ));
         }
-        if TcpStream::connect(("127.0.0.1", local_port)).await.is_ok() {
+        // A closed loopback port is not refused instantly on every platform:
+        // Windows firewalls / WFP can drop the SYN and leave the connect
+        // pending for many seconds. Bound each probe so a forward that is not
+        // listening *yet* (ssh still authenticating) fails fast and the loop
+        // retries, instead of consuming the whole deadline inside one connect.
+        let probe = tokio::time::timeout(
+            PROBE_TIMEOUT,
+            TcpStream::connect(("127.0.0.1", local_port)),
+        )
+        .await;
+        if matches!(probe, Ok(Ok(_))) {
+            logx::log(
+                "tunnel",
+                &format!("wait_for_forward connected tick={ticks} local_port={local_port}"),
+            );
             return Ok(());
         }
+        if ticks % 10 == 0 {
+            logx::log(
+                "tunnel",
+                &format!(
+                    "wait_for_forward tick={ticks} local_port={local_port} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ),
+            );
+        }
         if Instant::now() >= deadline {
+            logx::log("tunnel", &format!("wait_for_forward deadline hit tick={ticks}"));
             return Err(TunnelError::Timeout(stderr_snapshot(stderr_buf).await));
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -695,6 +949,7 @@ mod tests {
             user: "user".into(),
             port: 22,
             panel_port: 8080,
+            local_port: None,
             auth: AuthMethod::Agent,
             key_path: None,
             principal: None,
@@ -833,6 +1088,18 @@ mod tests {
             Some(_) => assert!((first + 1..first + PORT_TRIES).contains(&got), "{got}"),
             None => assert!((first..first + PORT_TRIES).contains(&got), "{got}"),
         }
+    }
+
+    #[test]
+    fn requested_local_listener_uses_explicit_port() {
+        let p = Profile {
+            id: "req-port".into(),
+            local_port: Some(43210),
+            ..test_profile()
+        };
+        let l = requested_local_listener(&p).unwrap();
+        assert_eq!(l.local_addr().unwrap().port(), 43210);
+        drop(l);
     }
 
     #[test]

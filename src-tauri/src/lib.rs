@@ -1,5 +1,6 @@
 mod commands;
 mod connection;
+mod logx;
 mod pair;
 mod tunnel;
 mod tunnel_embedded;
@@ -38,35 +39,41 @@ pub fn run() {
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
             }
+            logx::log("page_load", &format!("finished url={}", payload.url()));
             let Some(ctx) = webview.state::<pair::PairState>().for_url(payload.url()) else {
+                logx::log("page_load", "not panel origin, ignored");
                 return;
             };
+            logx::log("page_load", "panel origin matched");
             if let Some(token) = &ctx.admin_token {
                 let _ = webview.eval(&pair::token_script(token));
             }
             if !pair::is_pair_request(payload.url()) {
                 let _ = webview.eval(pair::PROBE_SCRIPT);
+                logx::log("page_load", "probe eval'd");
                 return;
             }
             let webview = webview.clone();
             tauri::async_runtime::spawn(async move {
-                let script = match pair::mint_code(
+                let minted = pair::mint_code(
                     &ctx.profile,
                     ctx.password.as_deref(),
                     ctx.embedded,
                     ctx.lang,
                 )
-                .await
-                {
-                    Ok(code) => pair::pair_script(&code),
+                .await;
+                let script = match &minted {
+                    Ok(code) => pair::pair_script(code),
                     Err(reason) => {
                         eprintln!("[volt-admin] auto-pair unavailable: {reason}");
+                        logx::log("page_load", &format!("mint FAILED: {reason}"));
                         pair::warning_script(&match ctx.lang {
                             tunnel::Lang::Ru => format!("Автосопряжение не выполнено: {reason}"),
                             tunnel::Lang::En => format!("Auto-pairing skipped: {reason}"),
                         })
                     }
                 };
+                logx::log("page_load", &format!("pair/mint script eval"));
                 let _ = webview.eval(&script);
             });
         })

@@ -50,6 +50,9 @@ const ru: Dict = {
   'auth.hint': 'Ключ по умолчанию берется из ssh-agent/~/.ssh. Пароль — только если ключа нет.',
   'field.keyPath': 'Путь к файлу ключа',
   'field.panelPort': 'Порт панели',
+  'field.localPort': 'Локальный порт туннеля',
+  'field.localPort.ph': 'авто',
+  'field.localPort.hint': 'Порт на этом ПК для SSH -L (отличается от порта панели). Пусто — выбрать автоматически.',
   'field.principal': 'Принципал (администратор)',
   'field.principal.hint': 'Идентификатор из [[authz.principals]] с профилем администратора; код сопряжения выпускается на него.',
   'field.paircodeCommand': 'Команда кода сопряжения',
@@ -60,6 +63,7 @@ const ru: Dict = {
   'err.save': 'Не удалось сохранить профиль: {e}',
   'err.delete': 'Не удалось удалить профиль: {e}',
   'err.connect': 'Не удалось подключиться: {e}',
+  'err.connectTimeout': 'время ожидания подключения истекло (90 с)',
 }
 
 const en: Dict = {
@@ -92,6 +96,9 @@ const en: Dict = {
   'auth.hint': 'By default the key comes from ssh-agent / ~/.ssh. A password is used only if there is no key.',
   'field.keyPath': 'Key file path',
   'field.panelPort': 'Panel port',
+  'field.localPort': 'Local tunnel port',
+  'field.localPort.ph': 'auto',
+  'field.localPort.hint': 'Loopback port on this machine for SSH -L (different from panel port). Leave empty to auto-pick.',
   'field.principal': 'Principal (administrator)',
   'field.principal.hint': 'An id from [[authz.principals]] with an administrator profile; the pairing code is minted for it.',
   'field.paircodeCommand': 'Pairing-code command',
@@ -102,6 +109,7 @@ const en: Dict = {
   'err.save': 'Failed to save profile: {e}',
   'err.delete': 'Failed to delete profile: {e}',
   'err.connect': 'Failed to connect: {e}',
+  'err.connectTimeout': 'connection attempt timed out (90 s)',
 }
 
 const messages: Record<Lang, Dict> = { ru, en }

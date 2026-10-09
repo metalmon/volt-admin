@@ -47,6 +47,13 @@ pub struct Profile {
     pub user: String,
     pub port: u16,
     pub panel_port: u16,
+    /// Local loopback port the SSH tunnel listens on when this profile is
+    /// connected (`-L <local_port>:127.0.0.1:<panel_port>`). None = pick a
+    /// stable per-profile port automatically (see
+    /// `crate::tunnel::requested_local_listener`). Independent from the
+    /// remote `panel_port`.
+    #[serde(default)]
+    pub local_port: Option<u16>,
     pub auth: AuthMethod,
     pub key_path: Option<String>,
     /// `[[authz.principals]]` id the auto-pairing code is bound to (an
@@ -73,7 +80,8 @@ mod tests {
             host: "h".into(),
             user: "u".into(),
             port: 22,
-            panel_port: 42627,
+            panel_port: 42617,
+            local_port: None,
             auth: AuthMethod::Agent,
             key_path: None,
             principal: None,

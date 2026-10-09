@@ -1,6 +1,6 @@
 [package]
 name = "volt-admin"
-version = "0.1.3"
+version = "0.1.4"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -25,6 +25,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net", "io-util"] }
 russh = { version = "0.63.3", default-features = false, features = ["ring", "flate2", "rsa"] }
+
+# Windows Job Objects: tie the spawned `ssh` tunnel to a kill-on-close job so
+# the OS reaps it whenever this process ends — even on a hard kill that skips
+# Rust's Drop — instead of leaking a child that keeps the local port bound.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# Linux: `prctl(PR_SET_PDEATHSIG)` gives the same "die with the app" guarantee
+# for the spawned `ssh` that the Windows Job Object does (see `child_guard`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
