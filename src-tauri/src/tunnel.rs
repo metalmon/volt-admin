@@ -93,14 +93,14 @@ mod child_guard {
             .spawn();
         match spawned {
             Ok(child) => {
-                logx::log(
+                crate::logx::log(
                     "tunnel",
                     &format!("macos watchdog pid={:?} watching ssh {ssh_pid}", child.id()),
                 );
                 Some(child)
             }
             Err(e) => {
-                logx::log("tunnel", &format!("macos watchdog spawn failed: {e}"));
+                crate::logx::log("tunnel", &format!("macos watchdog spawn failed: {e}"));
                 None
             }
         }
