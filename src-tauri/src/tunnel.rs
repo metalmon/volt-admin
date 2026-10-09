@@ -824,7 +824,11 @@ mod tests {
         let id = "bind-test";
         let first = preferred_port(id);
         let held = std::net::TcpListener::bind(("127.0.0.1", first)).ok();
-        let got = bind_stable_listener(id).unwrap().local_addr().unwrap().port();
+        let got = bind_stable_listener(id)
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         match held {
             Some(_) => assert!((first + 1..first + PORT_TRIES).contains(&got), "{got}"),
             None => assert!((first..first + PORT_TRIES).contains(&got), "{got}"),
