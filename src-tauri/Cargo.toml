@@ -24,7 +24,7 @@ tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net", "io-util"] }
-russh = { version = "0.63.3", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.64.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
