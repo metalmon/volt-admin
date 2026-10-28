@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { invoke } from '@tauri-apps/api/core'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardFooter } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -66,6 +66,34 @@ const modeLabelKey: Record<ConnMode, string> = {
   remote: 'mode.remote',
 }
 
+// `parse_profile_doc` and `save_profile` report a bad field as `field:<name>`
+// (see `commands.rs`); these are the form labels to name it by.
+const importFieldLabelKey: Record<string, string> = {
+  name: 'field.name',
+  host: 'field.host',
+  user: 'field.user',
+  port: 'field.sshPort',
+  panelPort: 'field.panelPort',
+  localPort: 'field.localPort',
+  keyPath: 'field.keyPath',
+  principal: 'field.principal',
+}
+
+const importButtonClass = cn(
+  'border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground',
+)
+
+/** The one-line "what is this profile" summary, shared by the profile cards
+ *  and the import preview — the preview must read exactly like the card the
+ *  import will produce. */
+function summaryOf(p: Profile, t: (key: string, vars?: Record<string, string | number>) => string) {
+  const tail =
+    p.mode === 'remote'
+      ? `${p.user}@${p.host}:${p.port} · ${t('card.panelPort', { port: p.panelPort })}`
+      : t('card.panelPort', { port: p.panelPort })
+  return `${t(modeLabelKey[p.mode])} · ${tail}`
+}
+
 /** Compact RU/EN switcher; the choice is persisted (see `lib/i18n`). */
 function LanguageToggle() {
   const { lang, setLang } = useI18n()
@@ -113,6 +141,12 @@ export default function Connect() {
   // password itself is never persisted (see `Profile` above).
   const [passwordPromptId, setPasswordPromptId] = useState<string | null>(null)
   const [passwordValue, setPasswordValue] = useState('')
+  // A parsed-but-not-yet-saved imported profile, awaiting confirmation. An
+  // imported profile carries a command that will be run on the target (see
+  // `profile_doc.rs`), so nothing reaches the store before the user sees it.
+  const [pending, setPending] = useState<Profile | null>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   const refresh = async () => {
     try {
@@ -130,6 +164,67 @@ export default function Connect() {
     void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  /** Turn a `parse_profile_doc` / `save_profile` rejection into a message. */
+  const importError = (raw: string) => {
+    const reason = raw.replace(/^Error:\s*/, '')
+    if (reason.startsWith('field:')) {
+      const field = reason.slice('field:'.length)
+      const key = importFieldLabelKey[field]
+      return t('err.import.field', { field: key ? t(key) : field })
+    }
+    if (reason === 'array') return t('err.import.array')
+    return t('err.import.json')
+  }
+
+  /** One pipeline for both import sources: parse, then show the preview. */
+  const importText = async (text: string) => {
+    try {
+      const parsed = await invoke<Profile>('parse_profile_doc', { text })
+      setError(null)
+      setPending(parsed)
+    } catch (e) {
+      setPending(null)
+      setError(importError(String(e)))
+    }
+  }
+
+  const importFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      await importText(text)
+    } catch {
+      // WebView2 can refuse the read (no user gesture, denied permission);
+      // the file route always works.
+      setPending(null)
+      setError(t('err.import.clipboard'))
+    }
+  }
+
+  const confirmImport = async () => {
+    if (!pending) return
+    try {
+      // A document may carry no id — mint one, exactly as the form does.
+      await invoke('save_profile', {
+        profile: { ...pending, id: pending.id || crypto.randomUUID() },
+      })
+      setPending(null)
+      await refresh()
+    } catch (e) {
+      setError(importError(String(e)))
+    }
+  }
+
+  const exportProfile = async (p: Profile) => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(p, null, 2))
+      setError(null)
+      setCopiedId(p.id)
+      setTimeout(() => setCopiedId((c) => (c === p.id ? null : c)), 3000)
+    } catch {
+      setError(t('err.export.clipboard'))
+    }
+  }
 
   const closeForm = () => {
     setFormOpen(false)
@@ -250,15 +345,15 @@ export default function Connect() {
                   <div className="flex min-w-0 flex-col">
                     <span className="truncate font-medium text-card-foreground">{p.name}</span>
                     <span className="whitespace-nowrap text-xs text-muted-foreground">
-                      {t(modeLabelKey[p.mode])}
-                      {p.mode === 'remote'
-                        ? ` · ${p.user}@${p.host}:${p.port}`
-                        : ` · ${t('card.panelPort', { port: p.panelPort })}`}
+                      {summaryOf(p, t)}
                     </span>
                   </div>
                   {/* Fluent: secondary/dismissive action on the left, primary
                       (positive) action rightmost. */}
                   <div className="flex shrink-0 items-center gap-2">
+                    <Button variant="outline" onClick={() => void exportProfile(p)}>
+                      {copiedId === p.id ? t('export.copied') : t('btn.export')}
+                    </Button>
                     <Button variant="outline" onClick={() => startEdit(p)} disabled={connectingId !== null}>
                       {t('btn.edit')}
                     </Button>
@@ -311,6 +406,41 @@ export default function Connect() {
             </li>
           ))}
         </ul>
+      )}
+
+      {pending && (
+        <Card className="gap-3 border-primary/40 py-5">
+          <CardContent className="flex flex-col gap-3 px-5">
+            <h2 className="font-heading text-lg text-foreground">{t('import.title')}</h2>
+            <div className="flex flex-col">
+              <span className="truncate font-medium text-card-foreground">{pending.name}</span>
+              <span className="text-xs text-muted-foreground">{summaryOf(pending, t)}</span>
+            </div>
+            {profiles.some((p) => p.id === pending.id) && (
+              <p className="text-xs text-muted-foreground">
+                {t('import.replaces', {
+                  name: profiles.find((p) => p.id === pending.id)?.name ?? pending.id,
+                })}
+              </p>
+            )}
+            {/* The pairing-code command runs on the machine this profile
+                points at, so it is shown verbatim before anything is saved. */}
+            {pending.paircodeCommand && (
+              <div className="flex flex-col gap-1 rounded-[var(--radius)] border border-destructive/40 bg-destructive/10 px-3 py-2">
+                <span className="text-xs text-destructive">{t('import.paircodeWarning')}</span>
+                <code className="break-all text-xs text-foreground">{pending.paircodeCommand}</code>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" onClick={() => setPending(null)}>
+                {t('btn.cancel')}
+              </Button>
+              <Button variant="default" onClick={() => void confirmImport()}>
+                {t('import.confirm')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {formOpen ? (
@@ -519,13 +649,37 @@ export default function Connect() {
           </CardContent>
         </Card>
       ) : (
-        <Button
-          variant="outline"
-          onClick={startCreate}
-          className={cn('self-end border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground')}
-        >
-          {t('btn.addProfile')}
-        </Button>
+        <div className="flex flex-wrap justify-end gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.currentTarget.files?.[0]
+              // Reset first: picking the same file twice must fire again.
+              e.currentTarget.value = ''
+              if (file) void file.text().then(importText)
+            }}
+          />
+          <Button
+            variant="outline"
+            onClick={() => fileRef.current?.click()}
+            className={importButtonClass}
+          >
+            {t('btn.importFile')}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => void importFromClipboard()}
+            className={importButtonClass}
+          >
+            {t('btn.importClipboard')}
+          </Button>
+          <Button variant="outline" onClick={startCreate} className={importButtonClass}>
+            {t('btn.addProfile')}
+          </Button>
+        </div>
       )}
     </main>
   )
