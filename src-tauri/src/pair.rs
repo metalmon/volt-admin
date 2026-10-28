@@ -392,6 +392,7 @@ mod tests {
             user: "u".into(),
             port: 22,
             panel_port: 42617,
+            local_port: None,
             auth: AuthMethod::Agent,
             key_path: None,
             principal: None,
@@ -457,7 +458,15 @@ mod tests {
             token_script("a'b<c>"),
             "window.__voltAdminToken = 'a\\'b\\x3cc\\x3e';"
         );
-        assert!(TOKEN_COMMAND.contains("${ZEROCLAW_CONFIG_DIR:-$HOME/.zeroclaw}"));
+        // The command walks every place voltd may keep its config, in order.
+        for dir in [
+            "$ZEROCLAW_CONFIG_DIR",
+            "$VOLTD_CONFIG_DIR",
+            "$HOME/.zeroclaw",
+            "/voltd-data/.voltd",
+        ] {
+            assert!(TOKEN_COMMAND.contains(dir), "{dir} missing from TOKEN_COMMAND");
+        }
     }
 
     #[test]

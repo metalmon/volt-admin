@@ -290,6 +290,7 @@ mod tests {
             user: "volt".into(),
             port: 2222,
             panel_port: 42617,
+            local_port: None,
             auth,
             key_path: None,
             principal: None,
