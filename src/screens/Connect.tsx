@@ -338,6 +338,8 @@ export default function Connect() {
                         ...d,
                         mode: m,
                         host: m === 'local' ? '127.0.0.1' : d.host === '127.0.0.1' ? '' : d.host,
+                        // Local has no tunnel: drop a port typed before the switch.
+                        localPort: m === 'local' ? null : d.localPort,
                       }))
                     }
                   >
@@ -454,21 +456,26 @@ export default function Connect() {
                 />
               </div>
 
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="profile-local-port">{t('field.localPort')}</Label>
-                <Input
-                  id="profile-local-port"
-                  type="number"
-                  placeholder={t('field.localPort.ph')}
-                  value={draft.localPort ?? ''}
-                  onChange={(e) => {
-                    const v = e.currentTarget.value
-                    const n = Number(v)
-                    setDraft((d) => ({ ...d, localPort: v === '' ? null : Number.isNaN(n) ? null : n }))
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">{t('field.localPort.hint')}</p>
-              </div>
+              {/* Only `Remote` opens a tunnel — `Local` talks to the panel
+                  directly (see `commands::connect`), so there is no local
+                  forwarded port to pick there. */}
+              {draft.mode === 'remote' && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="profile-local-port">{t('field.localPort')}</Label>
+                  <Input
+                    id="profile-local-port"
+                    type="number"
+                    placeholder={t('field.localPort.ph')}
+                    value={draft.localPort ?? ''}
+                    onChange={(e) => {
+                      const v = e.currentTarget.value
+                      const n = Number(v)
+                      setDraft((d) => ({ ...d, localPort: v === '' ? null : Number.isNaN(n) ? null : n }))
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">{t('field.localPort.hint')}</p>
+                </div>
+              )}
 
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="profile-principal">{t('field.principal')}</Label>
