@@ -205,12 +205,11 @@ pub async fn connect<R: Runtime>(
                     return Err(e.localize(lang));
                 }
                 Err(_) => {
-                    logx::log(
-                        "connect",
-                        "open_tunnel HARD TIMEOUT (30 s hard cap hit)",
-                    );
+                    logx::log("connect", "open_tunnel HARD TIMEOUT (30 s hard cap hit)");
                     return Err(match lang {
-                        Lang::Ru => "открытие SSH-туннеля зависло (жёсткий таймаут 30 с)".to_string(),
+                        Lang::Ru => {
+                            "открытие SSH-туннеля зависло (жёсткий таймаут 30 с)".to_string()
+                        }
                         Lang::En => "SSH tunnel setup hung (hard 30 s timeout)".to_string(),
                     });
                 }
@@ -250,7 +249,10 @@ pub async fn connect<R: Runtime>(
                 None
             }
         };
-    logx::log("connect", &format!("admin_token is_some={}", admin_token.is_some()));
+    logx::log(
+        "connect",
+        &format!("admin_token is_some={}", admin_token.is_some()),
+    );
 
     // Remember what a pairing code for this connection would need, so the
     // page-load hook can mint one on demand (see `crate::pair::PairContext`

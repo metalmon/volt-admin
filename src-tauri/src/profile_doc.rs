@@ -66,11 +66,7 @@ pub fn parse(text: &str) -> Result<Profile, String> {
         mode: doc.mode,
         // Local always means this machine's loopback, and it opens no tunnel,
         // so a host or a forwarded port in the document is meaningless there.
-        host: if local {
-            "127.0.0.1".into()
-        } else {
-            doc.host
-        },
+        host: if local { "127.0.0.1".into() } else { doc.host },
         user: doc.user,
         port: doc.port,
         panel_port: doc.panel_port,

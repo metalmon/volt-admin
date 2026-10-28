@@ -140,7 +140,13 @@ pub async fn mint_code(
     lang: Lang,
 ) -> Result<String, String> {
     let command = paircode_command(p);
-    logx::log("pair", &format!("mint_code start mode={:?} embedded={embedded} cmd={command}", p.mode));
+    logx::log(
+        "pair",
+        &format!(
+            "mint_code start mode={:?} embedded={embedded} cmd={command}",
+            p.mode
+        ),
+    );
     let output = match p.mode {
         ConnMode::Local => run_local(&command).await?,
         ConnMode::Remote if embedded => {
@@ -162,7 +168,10 @@ pub async fn mint_code(
     let code = extract_pair_code(&output);
     match &code {
         Some(_) => logx::log("pair", "mint_code ok (code extracted)"),
-        None => logx::log("pair", &format!("mint_code NO CODE in output: {}", tail_of(&output, 200))),
+        None => logx::log(
+            "pair",
+            &format!("mint_code NO CODE in output: {}", tail_of(&output, 200)),
+        ),
     }
     code.ok_or_else(|| {
         let tail = tail_of(&output, 160);
@@ -465,7 +474,10 @@ mod tests {
             "$HOME/.zeroclaw",
             "/voltd-data/.voltd",
         ] {
-            assert!(TOKEN_COMMAND.contains(dir), "{dir} missing from TOKEN_COMMAND");
+            assert!(
+                TOKEN_COMMAND.contains(dir),
+                "{dir} missing from TOKEN_COMMAND"
+            );
         }
     }
 

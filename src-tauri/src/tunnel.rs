@@ -174,7 +174,6 @@ mod child_guard {
     }
 }
 
-
 /// How long `open_tunnel` waits for the forwarded port to accept a TCP
 /// connection before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -528,10 +527,16 @@ pub async fn open_tunnel(
         if let Some(path) = askpass_path {
             let _ = std::fs::remove_file(path);
         }
-        logx::log("tunnel", &format!("wait_for_forward FAILED local_port={local_port}: {e}"));
+        logx::log(
+            "tunnel",
+            &format!("wait_for_forward FAILED local_port={local_port}: {e}"),
+        );
         return Err(annotate_error_hint(e, p, lang));
     }
-    logx::log("tunnel", &format!("wait_for_forward ok local_port={local_port}"));
+    logx::log(
+        "tunnel",
+        &format!("wait_for_forward ok local_port={local_port}"),
+    );
 
     Ok(Tunnel {
         child: Some(child),
@@ -747,11 +752,9 @@ async fn wait_for_forward(
         // pending for many seconds. Bound each probe so a forward that is not
         // listening *yet* (ssh still authenticating) fails fast and the loop
         // retries, instead of consuming the whole deadline inside one connect.
-        let probe = tokio::time::timeout(
-            PROBE_TIMEOUT,
-            TcpStream::connect(("127.0.0.1", local_port)),
-        )
-        .await;
+        let probe =
+            tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect(("127.0.0.1", local_port)))
+                .await;
         if matches!(probe, Ok(Ok(_))) {
             logx::log(
                 "tunnel",
@@ -759,7 +762,7 @@ async fn wait_for_forward(
             );
             return Ok(());
         }
-        if ticks % 10 == 0 {
+        if ticks.is_multiple_of(10) {
             logx::log(
                 "tunnel",
                 &format!(
@@ -769,7 +772,10 @@ async fn wait_for_forward(
             );
         }
         if Instant::now() >= deadline {
-            logx::log("tunnel", &format!("wait_for_forward deadline hit tick={ticks}"));
+            logx::log(
+                "tunnel",
+                &format!("wait_for_forward deadline hit tick={ticks}"),
+            );
             return Err(TunnelError::Timeout(stderr_snapshot(stderr_buf).await));
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -978,8 +984,8 @@ mod tests {
         assert!(a.iter().any(|s| s == "-N"));
         assert!(a.contains(&"-L".to_string()));
         assert!(a.iter().any(|s| s == "8081:127.0.0.1:42627")); // forward to server LOOPBACK, not 0.0.0.0
-        // The destination is the last argument and option parsing ends right
-        // before it, so a `-`-prefixed host can never become an ssh option.
+                                                                // The destination is the last argument and option parsing ends right
+                                                                // before it, so a `-`-prefixed host can never become an ssh option.
         assert_eq!(a[a.len() - 2], "--");
         assert_eq!(a[a.len() - 1], "adm@srv");
         assert!(a.iter().any(|s| s == "-i") && a.iter().any(|s| s == "/k"));

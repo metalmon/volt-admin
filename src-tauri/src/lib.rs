@@ -59,7 +59,7 @@ pub fn run() {
             };
             logx::log("page_load", "panel origin matched");
             if let Some(token) = &ctx.admin_token {
-                let _ = webview.eval(&pair::token_script(token));
+                let _ = webview.eval(pair::token_script(token));
             }
             if !pair::is_pair_request(payload.url()) {
                 let _ = webview.eval(pair::PROBE_SCRIPT);
@@ -86,7 +86,7 @@ pub fn run() {
                         })
                     }
                 };
-                logx::log("page_load", &format!("pair/mint script eval"));
+                logx::log("page_load", "pair/mint script eval");
                 let _ = webview.eval(&script);
             });
         })
@@ -137,8 +137,12 @@ fn fit_to_screen<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     // The decorations are part of the work area budget but not of `set_size`,
     // which takes the INNER size.
     let area = monitor.work_area().size;
-    let max_w = area.width.saturating_sub(outer.width.saturating_sub(inner.width));
-    let max_h = area.height.saturating_sub(outer.height.saturating_sub(inner.height));
+    let max_w = area
+        .width
+        .saturating_sub(outer.width.saturating_sub(inner.width));
+    let max_h = area
+        .height
+        .saturating_sub(outer.height.saturating_sub(inner.height));
     if inner.width <= max_w && inner.height <= max_h {
         return;
     }
