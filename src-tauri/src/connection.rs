@@ -78,6 +78,26 @@ fn is_safe_ssh_word(word: &str) -> bool {
             .any(|c| c.is_whitespace() || c.is_control() || c == '@')
 }
 
+/// Characters that let a string render differently from how it runs:
+/// newlines and other control characters (a preview collapses them), the
+/// bidi overrides behind "Trojan Source", and zero-width joiners/spaces.
+/// None of them belong in a path or a one-line command.
+fn has_hidden_characters(s: &str) -> bool {
+    s.chars().any(|c| {
+        c.is_control()
+            || matches!(c,
+                '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+    })
+}
+
+/// A UNC or device path (`\\host\share`, `//host/share`, `\\?\…`, `\\.\…`).
+/// Handing one to `ssh -i` makes Windows authenticate to that host to read
+/// the "key" — which leaks an NTLM hash to whoever sent the profile.
+fn is_network_or_device_path(path: &str) -> bool {
+    let p = path.trim_start();
+    p.starts_with("\\\\") || p.starts_with("//")
+}
+
 impl Profile {
     /// Check the fields that must hold for this profile to be usable, in the
     /// order a reader of the form would meet them. `Err` carries the bare
@@ -98,6 +118,19 @@ impl Profile {
         }
         if self.local_port == Some(0) {
             return Err("localPort".into());
+        }
+        // The import preview is a consent dialog: what it shows must be what
+        // runs. A command carrying a newline or a bidi override renders as
+        // one harmless line and executes as something else.
+        if let Some(command) = self.paircode_command.as_deref() {
+            if has_hidden_characters(command) {
+                return Err("paircodeCommand".into());
+            }
+        }
+        if let Some(key) = self.key_path.as_deref() {
+            if has_hidden_characters(key) || is_network_or_device_path(key) {
+                return Err("keyPath".into());
+            }
         }
         // `principal` is interpolated into the pairing-code command, which
         // runs through `sh -c` / `cmd /C` (see `crate::pair`), so it must not
@@ -263,6 +296,43 @@ mod tests {
             ..valid()
         };
         assert_eq!(p.validate(), Ok(()), "a real principal id must pass");
+    }
+
+    #[test]
+    fn validate_rejects_a_command_that_hides_what_it_runs() {
+        // The import preview is what the user consents to, so a command must
+        // not be able to render as less than it is.
+        for command in [
+            "echo ok\nrm -rf /",
+            "echo ok\u{202e}rm -rf /",
+            "echo\u{200b}ok; rm -rf /",
+        ] {
+            let p = Profile {
+                paircode_command: Some(command.into()),
+                ..valid()
+            };
+            assert_eq!(p.validate(), Err("paircodeCommand".into()), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_network_key_path() {
+        // `ssh -i \\host\share\key` makes Windows authenticate to `host`,
+        // handing an NTLM hash to whoever wrote the profile.
+        for key in ["\\\\10.0.0.9\\share\\id_ed25519", "//10.0.0.9/share/id"] {
+            let p = Profile {
+                auth: AuthMethod::KeyFile,
+                key_path: Some(key.into()),
+                ..valid()
+            };
+            assert_eq!(p.validate(), Err("keyPath".into()), "{key:?}");
+        }
+        let p = Profile {
+            auth: AuthMethod::KeyFile,
+            key_path: Some("~/.ssh/id_ed25519".into()),
+            ..valid()
+        };
+        assert_eq!(p.validate(), Ok(()), "a normal key path must pass");
     }
 
     #[test]

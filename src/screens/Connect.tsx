@@ -77,6 +77,7 @@ const importFieldLabelKey: Record<string, string> = {
   localPort: 'field.localPort',
   keyPath: 'field.keyPath',
   principal: 'field.principal',
+  paircodeCommand: 'field.paircodeCommand',
 }
 
 const importButtonClass = cn(
@@ -423,12 +424,40 @@ export default function Connect() {
                 })}
               </p>
             )}
-            {/* The pairing-code command runs on the machine this profile
-                points at, so it is shown verbatim before anything is saved. */}
+            {/* Everything an import decides on the user's behalf, named:
+                which key file is read, how it authenticates, whose pairing
+                code is minted, which loopback port is bound. */}
+            <dl className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+              {([
+                ['field.auth', t(authLabelKey[pending.auth])],
+                ['field.keyPath', pending.keyPath],
+                ['field.principal', pending.principal],
+                ['field.localPort', pending.localPort?.toString()],
+              ] as const)
+                .filter(([, value]) => value)
+                .map(([key, value]) => (
+                  <div key={key} className="flex gap-2">
+                    <dt className="shrink-0">{t(key)}:</dt>
+                    <dd className="break-all text-foreground">{value}</dd>
+                  </div>
+                ))}
+            </dl>
+            {/* The pairing-code command is shown verbatim, and `validate`
+                refuses the characters that would let it render as less than
+                it runs (newlines, bidi overrides, zero-width). `pre-wrap`
+                keeps the rest of the whitespace honest. */}
             {pending.paircodeCommand && (
               <div className="flex flex-col gap-1 rounded-[var(--radius)] border border-destructive/40 bg-destructive/10 px-3 py-2">
-                <span className="text-xs text-destructive">{t('import.paircodeWarning')}</span>
-                <code className="break-all text-xs text-foreground">{pending.paircodeCommand}</code>
+                <span className="text-xs text-destructive">
+                  {t(
+                    pending.mode === 'local'
+                      ? 'import.paircodeWarning.local'
+                      : 'import.paircodeWarning',
+                  )}
+                </span>
+                <code className="whitespace-pre-wrap break-all text-xs text-foreground">
+                  {pending.paircodeCommand}
+                </code>
               </div>
             )}
             <div className="flex justify-end gap-2 pt-1">
