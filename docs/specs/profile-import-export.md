@@ -1,6 +1,6 @@
 # Spec: profile import and export
 
-**Status:** approved, not implemented
+**Status:** implemented (`6a9925e`…`6936abf`)
 **Owner:** launcher (Connect screen + `connection.rs`)
 
 ## Problem
@@ -131,7 +131,7 @@ two rules:
    `-` (ssh would read `-oProxyCommand=…` as an option and run it locally)
    or contain whitespace, `@` or control characters; `principal` is
    `[A-Za-z0-9_.-]{1,64}`; `keyPath` may not be a UNC or device path (`ssh
-   -i \host\share\key` leaks an NTLM hash to that host); and neither
+   -i \\host\share\key` leaks an NTLM hash to that host); and neither
    `keyPath` nor `paircodeCommand` may carry newlines, bidi overrides or
    zero-width characters, which would let the preview render as less than
    what runs.
@@ -168,7 +168,7 @@ cannot be written to the store by any route.
 - A profile carrying a `paircodeCommand` shows that command in the preview,
   with its key path, principal and auth method, before it can be saved.
 - A document whose `host` is `-oProxyCommand=calc.exe`, whose `keyPath` is
-  `\10.0.0.9\share\id`, or whose command hides a second line behind a
+  `\\10.0.0.9\share\id`, or whose command hides a second line behind a
   bidi override is refused by name, on import and on save alike.
 - The kit can ship `profile.json`, and a README line pointing at "import
   profile" replaces the manual seven-field walkthrough.
