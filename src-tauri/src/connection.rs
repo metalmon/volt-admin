@@ -94,8 +94,10 @@ fn has_hidden_characters(s: &str) -> bool {
 /// Handing one to `ssh -i` makes Windows authenticate to that host to read
 /// the "key" — which leaks an NTLM hash to whoever sent the profile.
 fn is_network_or_device_path(path: &str) -> bool {
-    let p = path.trim_start();
-    p.starts_with("\\\\") || p.starts_with("//")
+    // Windows takes `/` and `\` as the same separator, so `\/host\share` and
+    // `/\host\share` are UNC too — normalize before looking at the prefix.
+    // This also covers `\\?\…` and `\\.\…`, which start with two separators.
+    path.trim_start().replace('/', "\\").starts_with("\\\\")
 }
 
 impl Profile {
@@ -319,7 +321,16 @@ mod tests {
     fn validate_rejects_a_network_key_path() {
         // `ssh -i \\host\share\key` makes Windows authenticate to `host`,
         // handing an NTLM hash to whoever wrote the profile.
-        for key in ["\\\\10.0.0.9\\share\\id_ed25519", "//10.0.0.9/share/id"] {
+        // Windows reads `/` and `\` alike, so every mix of the two is UNC.
+        for key in [
+            "\\\\10.0.0.9\\share\\id_ed25519",
+            "//10.0.0.9/share/id",
+            "\\/10.0.0.9/share/id",
+            "/\\10.0.0.9\\share\\id",
+            "  \\\\10.0.0.9\\share\\id",
+            "\\\\?\\UNC\\10.0.0.9\\share\\id",
+            "\\\\.\\pipe\\x",
+        ] {
             let p = Profile {
                 auth: AuthMethod::KeyFile,
                 key_path: Some(key.into()),
