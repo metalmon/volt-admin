@@ -345,16 +345,16 @@ export default function Connect() {
                 <CardContent className="flex items-center justify-between gap-3 px-5">
                   <div className="flex min-w-0 flex-col">
                     <span className="truncate font-medium text-card-foreground">{p.name}</span>
-                    <span className="whitespace-nowrap text-xs text-muted-foreground">
+                    {/* Truncates rather than running on: the action row to
+                        the right is `shrink-0`, so a long host used to slide
+                        underneath the buttons. */}
+                    <span className="truncate text-xs text-muted-foreground">
                       {summaryOf(p, t)}
                     </span>
                   </div>
                   {/* Fluent: secondary/dismissive action on the left, primary
                       (positive) action rightmost. */}
                   <div className="flex shrink-0 items-center gap-2">
-                    <Button variant="outline" onClick={() => void exportProfile(p)}>
-                      {copiedId === p.id ? t('export.copied') : t('btn.export')}
-                    </Button>
                     <Button variant="outline" onClick={() => startEdit(p)} disabled={connectingId !== null}>
                       {t('btn.edit')}
                     </Button>
@@ -666,7 +666,24 @@ export default function Connect() {
 
               {/* Fluent: form action row lives at the bottom-right, primary
                   action ("Save") rightmost, secondary ("Cancel") to its left. */}
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+                {/* Export lives here, not on the card: copying a profile is a
+                    set-up-another-machine action, and the card's row is for
+                    the everyday three. Editing is where you already are when
+                    you want to hand this profile to someone. */}
+                {editingId && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mr-auto"
+                    onClick={() => {
+                      const saved = profiles.find((p) => p.id === editingId)
+                      if (saved) void exportProfile(saved)
+                    }}
+                  >
+                    {copiedId === editingId ? t('export.copied') : t('btn.export')}
+                  </Button>
+                )}
                 <Button type="button" variant="outline" onClick={closeForm}>
                   {t('btn.cancel')}
                 </Button>
