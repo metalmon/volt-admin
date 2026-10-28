@@ -2,6 +2,7 @@ mod commands;
 mod connection;
 mod logx;
 mod pair;
+mod profile_doc;
 mod tunnel;
 mod tunnel_embedded;
 

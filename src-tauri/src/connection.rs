@@ -67,9 +67,140 @@ pub struct Profile {
     pub paircode_command: Option<String>,
 }
 
+impl Profile {
+    /// Check the fields that must hold for this profile to be usable, in the
+    /// order a reader of the form would meet them. `Err` carries the bare
+    /// camelCase field name — the UI turns it into a localized message (see
+    /// `commands::parse_profile_doc`), so nothing here knows about languages.
+    ///
+    /// Remote-only fields are not checked for a `Local` profile: that mode
+    /// talks to `127.0.0.1:<panel_port>` directly and never reads them.
+    /// `id` is not checked here either — an imported document legitimately
+    /// arrives without one, and it is `save_profile` that must not store a
+    /// profile it cannot address.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("name".into());
+        }
+        if self.panel_port == 0 {
+            return Err("panelPort".into());
+        }
+        if self.local_port == Some(0) {
+            return Err("localPort".into());
+        }
+        if self.mode == ConnMode::Remote {
+            if self.host.trim().is_empty() {
+                return Err("host".into());
+            }
+            if self.user.trim().is_empty() {
+                return Err("user".into());
+            }
+            if self.port == 0 {
+                return Err("port".into());
+            }
+            if self.auth == AuthMethod::KeyFile
+                && self.key_path.as_deref().unwrap_or("").trim().is_empty()
+            {
+                return Err("keyPath".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A profile that passes `validate`; each test breaks one thing.
+    fn valid() -> Profile {
+        Profile {
+            id: "pilot-backend".into(),
+            name: "VoltSSH".into(),
+            mode: ConnMode::Remote,
+            host: "backend.volt.oktaplus.ru".into(),
+            user: "volt".into(),
+            port: 2222,
+            panel_port: 42617,
+            local_port: None,
+            auth: AuthMethod::Agent,
+            key_path: None,
+            principal: None,
+            paircode_command: None,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_a_complete_remote_profile() {
+        assert_eq!(valid().validate(), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_a_blank_name() {
+        let p = Profile {
+            name: "  ".into(),
+            ..valid()
+        };
+        assert_eq!(p.validate(), Err("name".into()));
+    }
+
+    #[test]
+    fn validate_rejects_a_zero_panel_port() {
+        let p = Profile {
+            panel_port: 0,
+            ..valid()
+        };
+        assert_eq!(p.validate(), Err("panelPort".into()));
+    }
+
+    #[test]
+    fn validate_rejects_a_remote_without_host_or_user() {
+        let p = Profile {
+            host: "".into(),
+            ..valid()
+        };
+        assert_eq!(p.validate(), Err("host".into()));
+        let p = Profile {
+            user: "".into(),
+            ..valid()
+        };
+        assert_eq!(p.validate(), Err("user".into()));
+    }
+
+    #[test]
+    fn validate_rejects_key_file_auth_without_a_path() {
+        let p = Profile {
+            auth: AuthMethod::KeyFile,
+            key_path: None,
+            ..valid()
+        };
+        assert_eq!(p.validate(), Err("keyPath".into()));
+    }
+
+    #[test]
+    fn validate_rejects_a_zero_local_port() {
+        let p = Profile {
+            local_port: Some(0),
+            ..valid()
+        };
+        assert_eq!(p.validate(), Err("localPort".into()));
+    }
+
+    #[test]
+    fn validate_ignores_remote_fields_for_local() {
+        // A local profile reaches the panel on loopback: host, user, SSH port
+        // and the key are never read, so blanks there must not block it.
+        let p = Profile {
+            mode: ConnMode::Local,
+            host: "".into(),
+            user: "".into(),
+            port: 0,
+            auth: AuthMethod::KeyFile,
+            key_path: None,
+            ..valid()
+        };
+        assert_eq!(p.validate(), Ok(()));
+    }
 
     #[test]
     fn profile_roundtrips_without_password_field() {
