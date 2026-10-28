@@ -587,8 +587,14 @@ pub fn build_ssh_exec_args(p: &Profile, command: &str) -> Vec<String> {
             args.push(key.clone());
         }
     }
-    args.push(format!("{}@{}", p.user, p.host));
+    // `--` ENDS SSH'S OWN OPTION PARSING, so it belongs before the
+    // destination (same as `build_ssh_args`). It used to sit after it, where
+    // ssh no longer reads options at all: everything past the destination is
+    // the remote command, joined with spaces, so the target shell was handed
+    // `-- voltd gateway get-paircode …` and answered `--: command not found`.
+    // That is every `Remote` pairing code and every admin-token read.
     args.push("--".to_string());
+    args.push(format!("{}@{}", p.user, p.host));
     args.push(command.to_string());
     args
 }
@@ -996,6 +1002,22 @@ mod tests {
         assert!(a.iter().any(|s| s == "ExitOnForwardFailure=yes"));
         assert!(a.iter().any(|s| s == "ConnectTimeout=10"));
         assert!(!a.iter().any(|s| s.starts_with("BatchMode"))); // must not disable password-auth prompt path
+    }
+
+    #[test]
+    fn exec_args_put_the_command_straight_after_the_destination() {
+        // ssh stops reading options at the destination: anything between it
+        // and the command is sent to the remote shell as part of the command
+        // line. `--` therefore has to come BEFORE the destination.
+        let a = build_ssh_exec_args(&test_profile(), "voltd gateway get-paircode --new");
+        let dest = a.iter().position(|s| s.contains('@')).expect("destination");
+        assert_eq!(a[dest - 1], "--", "option parsing must end before the host");
+        assert_eq!(
+            a[dest + 1],
+            "voltd gateway get-paircode --new",
+            "the command must follow the destination with nothing in between"
+        );
+        assert_eq!(a.len(), dest + 2, "and be the last argument");
     }
 
     #[test]
