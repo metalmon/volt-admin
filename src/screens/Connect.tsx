@@ -34,7 +34,7 @@ export interface Profile {
   paircodeCommand: string | null
 }
 
-const DEFAULT_PANEL_PORT = 42627
+const DEFAULT_PANEL_PORT = 42617
 const DEFAULT_SSH_PORT = 22
 
 type Draft = Omit<Profile, 'id'>
