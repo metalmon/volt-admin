@@ -168,9 +168,18 @@ pub async fn mint_code(
     let code = extract_pair_code(&output);
     match &code {
         Some(_) => logx::log("pair", "mint_code ok (code extracted)"),
+        // Shape, not content: the extractor failing does not mean the
+        // command printed nothing useful — it may well have printed a code
+        // in a format we did not recognize, and this line is copied into the
+        // diagnostics the user sends to someone else. The real tail is in
+        // the error below, on their screen, where they decide what to share.
         None => logx::log(
             "pair",
-            &format!("mint_code NO CODE in output: {}", tail_of(&output, 200)),
+            &format!(
+                "mint_code NO CODE extracted (output: {} bytes, {} lines)",
+                output.len(),
+                output.lines().count()
+            ),
         ),
     }
     code.ok_or_else(|| {

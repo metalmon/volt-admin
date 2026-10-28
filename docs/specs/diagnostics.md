@@ -58,9 +58,19 @@ port, ssh child exit codes and stderr tails), page loads on the panel origin,
 pairing attempts and failures.
 
 **What must never be logged or copied:** the gateway admin token, a pairing
-code, a password, the contents of a key file. Pairing code minting logs the
-outcome, not the code. This is a rule on the call sites; `logx` itself stays
-dependency-free and does no redaction.
+code, a password, the contents of a key file. This is a rule on the call
+sites; `logx` itself stays dependency-free and does no redaction — the
+diagnostics tail is pasted verbatim, so a redaction pass over it would be a
+denylist guarding the one place that must not fail.
+
+The invariant that makes the paste safe: **a remote command's output is
+logged only when the command failed** (non-zero exit). A failed command
+printed neither a code nor a token, its output is a shell error, and that is
+exactly what support needs. On success the call sites log the shape of the
+output — how many bytes, how many lines — and never its content. The same
+holds when a pairing code cannot be extracted: the log says it could not,
+the real output goes to the error on the user's screen, where they decide
+what to share.
 
 ## Out of scope
 

@@ -15,6 +15,12 @@
 //! code, not a password, not the contents of a key file — the file is plain
 //! text on disk and its whole point is to be copied to someone else. See
 //! `docs/specs/diagnostics.md`.
+//!
+//! The rule that keeps that true: a remote command's output is logged only
+//! when the command FAILED (non-zero exit), because a failed command printed
+//! neither a code nor a token — that is the one case where the output is
+//! only a shell error, and also the one case support actually needs. On
+//! success, callers log the shape of the output and never its content.
 
 use std::fs::OpenOptions;
 use std::io::Write;
