@@ -77,9 +77,35 @@ pub fn list_profiles(app: AppHandle) -> Result<Vec<Profile>, String> {
     load_profiles(&app)
 }
 
+/// Read a profile document (a file the kit ships, or pasted text) into a
+/// `Profile`, WITHOUT storing it: the UI shows the result and asks before
+/// calling `save_profile`, because `paircode_command` is a command that will
+/// later be run on the target machine (see `crate::profile_doc`).
+///
+/// `Err` is `"json"`, `"array"`, or `"field:<name>"` — the UI maps the field
+/// name onto its existing `field.*` labels for the message.
+#[command]
+pub fn parse_profile_doc(text: String) -> Result<Profile, String> {
+    crate::profile_doc::parse(&text).map_err(as_ui_error)
+}
+
+/// `"json"` / `"array"` travel as-is; anything else is a field name.
+fn as_ui_error(reason: String) -> String {
+    match reason.as_str() {
+        "json" | "array" => reason,
+        field => format!("field:{field}"),
+    }
+}
+
 /// Create or update a connection profile (matched by `id`).
 #[command]
 pub fn save_profile(app: AppHandle, profile: Profile) -> Result<(), String> {
+    // Guard the store itself, not just the importer: the form, an imported
+    // document and any future caller all land here.
+    if profile.id.trim().is_empty() {
+        return Err("field:id".into());
+    }
+    profile.validate().map_err(as_ui_error)?;
     let mut profiles = load_profiles(&app)?;
     match profiles.iter_mut().find(|p| p.id == profile.id) {
         Some(existing) => *existing = profile,

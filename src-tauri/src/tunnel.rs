@@ -376,6 +376,11 @@ pub fn build_ssh_args(p: &Profile, localport: u16) -> Vec<String> {
     // AuthMethod::Password is fed via SSH_ASKPASS at spawn time (see
     // open_tunnel), not via argv.
 
+    // End option parsing before the destination. `Profile::validate` already
+    // refuses a `user`/`host` starting with `-`, but a profiles.json edited
+    // outside the app is read without re-validation, and `-oProxyCommand=…`
+    // as a destination executes a command on THIS machine.
+    args.push("--".to_string());
     args.push(format!("{}@{}", p.user, p.host));
     args
 }
@@ -973,6 +978,10 @@ mod tests {
         assert!(a.iter().any(|s| s == "-N"));
         assert!(a.contains(&"-L".to_string()));
         assert!(a.iter().any(|s| s == "8081:127.0.0.1:42627")); // forward to server LOOPBACK, not 0.0.0.0
+        // The destination is the last argument and option parsing ends right
+        // before it, so a `-`-prefixed host can never become an ssh option.
+        assert_eq!(a[a.len() - 2], "--");
+        assert_eq!(a[a.len() - 1], "adm@srv");
         assert!(a.iter().any(|s| s == "-i") && a.iter().any(|s| s == "/k"));
         assert!(a.iter().any(|s| s == "adm@srv"));
         assert!(a.iter().any(|s| s == "-p") && a.iter().any(|s| s == "2222"));

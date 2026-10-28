@@ -67,6 +67,17 @@ pub struct Profile {
     pub paircode_command: Option<String>,
 }
 
+/// Is `word` safe to put in the `user@host` argument of an `ssh` command
+/// line? Rejects a leading `-` (ssh would read the whole destination as an
+/// option), whitespace, a `@`, and control characters.
+fn is_safe_ssh_word(word: &str) -> bool {
+    let word = word.trim();
+    !word.starts_with('-')
+        && !word
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '@')
+}
+
 impl Profile {
     /// Check the fields that must hold for this profile to be usable, in the
     /// order a reader of the form would meet them. `Err` carries the bare
@@ -88,11 +99,37 @@ impl Profile {
         if self.local_port == Some(0) {
             return Err("localPort".into());
         }
+        // `principal` is interpolated into the pairing-code command, which
+        // runs through `sh -c` / `cmd /C` (see `crate::pair`), so it must not
+        // be able to carry shell syntax. An id from `[[authz.principals]]`
+        // never needs more than this alphabet.
+        if let Some(principal) = self.principal.as_deref() {
+            let principal = principal.trim();
+            if !principal.is_empty()
+                && (principal.len() > 64
+                    || !principal
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))
+            {
+                return Err("principal".into());
+            }
+        }
         if self.mode == ConnMode::Remote {
             if self.host.trim().is_empty() {
                 return Err("host".into());
             }
             if self.user.trim().is_empty() {
+                return Err("user".into());
+            }
+            // `user` and `host` are passed to ssh as one `user@host` argv
+            // entry. A value starting with `-` would be read as an OPTION
+            // instead — `-oProxyCommand=…` runs a command on THIS machine —
+            // and whitespace or a second `@` splits the destination. Neither
+            // is legal in a real username or hostname.
+            if !is_safe_ssh_word(&self.host) {
+                return Err("host".into());
+            }
+            if !is_safe_ssh_word(&self.user) {
                 return Err("user".into());
             }
             if self.port == 0 {
@@ -184,6 +221,48 @@ mod tests {
             ..valid()
         };
         assert_eq!(p.validate(), Err("localPort".into()));
+    }
+
+    #[test]
+    fn validate_rejects_an_ssh_option_as_host_or_user() {
+        // An imported profile is untrusted input: `ssh … -oProxyCommand=…`
+        // would run a command on THIS machine.
+        for host in ["-oProxyCommand=calc.exe", "a host", "h@h"] {
+            let p = Profile {
+                host: host.into(),
+                ..valid()
+            };
+            assert_eq!(p.validate(), Err("host".into()), "host: {host:?}");
+        }
+        for user in ["-oProxyCommand=calc.exe", "ro ot"] {
+            let p = Profile {
+                user: user.into(),
+                ..valid()
+            };
+            assert_eq!(p.validate(), Err("user".into()), "user: {user:?}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_shell_syntax_in_the_principal() {
+        // It is interpolated into the pairing-code command, which is run by a
+        // shell on the target machine.
+        for principal in ["admin; rm -rf /", "$(id)", "a`b`", "admin\nops"] {
+            let p = Profile {
+                principal: Some(principal.into()),
+                ..valid()
+            };
+            assert_eq!(
+                p.validate(),
+                Err("principal".into()),
+                "principal: {principal:?}"
+            );
+        }
+        let p = Profile {
+            principal: Some("ops.admin_1-x".into()),
+            ..valid()
+        };
+        assert_eq!(p.validate(), Ok(()), "a real principal id must pass");
     }
 
     #[test]

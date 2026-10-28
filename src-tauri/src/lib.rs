@@ -93,6 +93,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,
             commands::save_profile,
+            commands::parse_profile_doc,
             commands::delete_profile,
             commands::connect,
             commands::disconnect
