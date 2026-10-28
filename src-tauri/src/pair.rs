@@ -191,21 +191,93 @@ pub async fn mint_code(
     })
 }
 
-/// Prints the gateway admin token on the gateway machine (`Remote` mode). The
-/// token lives in `<config-dir>/data/gateway-admin.token`, but the config dir
-/// is not always discoverable over a bare SSH exec: the kit container runs
-/// `daemon --config-dir /voltd-data/.voltd` and does NOT export
-/// `ZEROCLAW_CONFIG_DIR`, while a native install keeps it at
-/// `~/.zeroclaw`. So probe every plausible location and fall back to a bounded
-/// `find`. Prints nothing (non-zero) when the token cannot be located.
-const TOKEN_COMMAND: &str = concat!(
-    "for d in \"$ZEROCLAW_CONFIG_DIR\" \"$VOLTD_CONFIG_DIR\" \"$HOME/.zeroclaw\" ",
-    "/voltd-data/.voltd; do ",
-    "[ -n \"$d\" ] && [ -f \"$d/data/gateway-admin.token\" ] && ",
-    "{ cat \"$d/data/gateway-admin.token\"; exit 0; }; done; ",
-    "f=$(find / -name gateway-admin.token 2>/dev/null | head -n1); ",
-    "[ -n \"$f\" ] && cat \"$f\""
-);
+/// Where a voltd config directory may live, and therefore where
+/// `data/gateway-admin.token` may be. Newest naming first: the project moved
+/// from `zeroclaw` to `voltd`, and both are still in the field.
+///
+/// ONE list for both modes. It used to be two, and they drifted: the remote
+/// command probed four locations while the local branch only ever looked in
+/// `~/.zeroclaw`, so a local profile on a `.voltd` install silently got no
+/// admin token.
+enum ConfigDir {
+    /// An environment variable holding the directory.
+    Env(&'static str),
+    /// A directory under the user's home.
+    Home(&'static str),
+    /// A fixed path — the kit's container runs
+    /// `daemon --config-dir /voltd-data/.voltd` and exports nothing.
+    Absolute(&'static str),
+}
+
+const CONFIG_DIRS: &[ConfigDir] = &[
+    ConfigDir::Env("VOLTD_CONFIG_DIR"),
+    ConfigDir::Env("ZEROCLAW_CONFIG_DIR"),
+    ConfigDir::Home(".voltd"),
+    ConfigDir::Home(".zeroclaw"),
+    ConfigDir::Absolute("/voltd-data/.voltd"),
+];
+
+/// Path of the token inside a config directory.
+const TOKEN_REL: &str = "data/gateway-admin.token";
+
+/// Shell command that prints the gateway admin token on the gateway machine
+/// (`Remote` mode): walk [`CONFIG_DIRS`], then fall back to a bounded `find`.
+/// Prints nothing (non-zero) when the token cannot be located.
+fn token_command() -> String {
+    let dirs: Vec<String> = CONFIG_DIRS
+        .iter()
+        .map(|d| match d {
+            ConfigDir::Env(var) => format!("\"${var}\""),
+            ConfigDir::Home(suffix) => format!("\"$HOME/{suffix}\""),
+            ConfigDir::Absolute(path) => (*path).to_string(),
+        })
+        .collect();
+    format!(
+        "for d in {}; do [ -n \"$d\" ] && [ -f \"$d/{TOKEN_REL}\" ] && \
+         {{ cat \"$d/{TOKEN_REL}\"; exit 0; }}; done; \
+         f=$(find / -name gateway-admin.token 2>/dev/null | head -n1); \
+         [ -n \"$f\" ] && cat \"$f\"",
+        dirs.join(" ")
+    )
+}
+
+/// [`CONFIG_DIRS`] resolved on this machine. Takes its lookups as arguments
+/// so it can be tested without touching the process environment.
+fn local_config_dirs(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    home: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    CONFIG_DIRS
+        .iter()
+        .filter_map(|d| match d {
+            ConfigDir::Env(var) => env(var)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+            ConfigDir::Home(suffix) => home.as_ref().map(|h| h.join(suffix)),
+            ConfigDir::Absolute(path) => Some(std::path::PathBuf::from(path)),
+        })
+        .collect()
+}
+
+/// Read the token from the first config directory on this machine that has
+/// one. The error names everything that was tried — it goes to the log.
+fn read_local_token() -> Result<String, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    // A closure, not `std::env::var_os` itself: that one is generic over the
+    // key type and will not coerce to this `Fn(&str)`.
+    let dirs = local_config_dirs(|var| std::env::var_os(var), home);
+    let mut tried = Vec::new();
+    for dir in &dirs {
+        let path = dir.join(TOKEN_REL);
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => return Ok(raw),
+            Err(_) => tried.push(path.display().to_string()),
+        }
+    }
+    Err(format!("no gateway-admin.token in: {}", tried.join(", ")))
+}
 
 /// Read the gateway admin token from where voltd lives (this machine in
 /// `Local` mode, the SSH target in `Remote` mode). The error is for the log
@@ -217,21 +289,10 @@ pub async fn fetch_admin_token(
     lang: Lang,
 ) -> Result<String, String> {
     let raw = match p.mode {
-        ConnMode::Local => {
-            let dir = std::env::var_os("ZEROCLAW_CONFIG_DIR")
-                .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME")
-                        .or_else(|| std::env::var_os("USERPROFILE"))
-                        .map(|h| std::path::PathBuf::from(h).join(".zeroclaw"))
-                })
-                .ok_or("no ZEROCLAW_CONFIG_DIR, HOME or USERPROFILE")?;
-            let path = dir.join("data").join("gateway-admin.token");
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?
-        }
+        ConnMode::Local => read_local_token()?,
         ConnMode::Remote if embedded => return Err("built-in ssh client has no exec path".into()),
         ConnMode::Remote => {
-            tunnel::run_ssh_command(p, password, TOKEN_COMMAND, EXEC_TIMEOUT, lang).await?
+            tunnel::run_ssh_command(p, password, &token_command(), EXEC_TIMEOUT, lang).await?
         }
     };
     validate_token(&raw).ok_or_else(|| "token file content does not look like a token".into())
@@ -476,18 +537,49 @@ mod tests {
             token_script("a'b<c>"),
             "window.__voltAdminToken = 'a\\'b\\x3cc\\x3e';"
         );
-        // The command walks every place voltd may keep its config, in order.
-        for dir in [
-            "$ZEROCLAW_CONFIG_DIR",
-            "$VOLTD_CONFIG_DIR",
-            "$HOME/.zeroclaw",
-            "/voltd-data/.voltd",
-        ] {
-            assert!(
-                TOKEN_COMMAND.contains(dir),
-                "{dir} missing from TOKEN_COMMAND"
-            );
+    }
+
+    /// Both modes must look in the same places — they used to drift, and a
+    /// local profile on a `.voltd` install got no token because of it.
+    #[test]
+    fn both_modes_probe_every_config_dir() {
+        let command = token_command();
+        let local = local_config_dirs(
+            |v| (v == "VOLTD_CONFIG_DIR").then(|| "/from/env".into()),
+            Some(std::path::PathBuf::from("/home/u")),
+        );
+        for dir in ["$VOLTD_CONFIG_DIR", "$ZEROCLAW_CONFIG_DIR"] {
+            assert!(command.contains(dir), "{dir} missing from the ssh command");
         }
+        for dir in ["$HOME/.voltd", "$HOME/.zeroclaw", "/voltd-data/.voltd"] {
+            assert!(command.contains(dir), "{dir} missing from the ssh command");
+        }
+        assert!(command.contains("data/gateway-admin.token"));
+
+        let shown: Vec<String> = local.iter().map(|p| p.display().to_string()).collect();
+        assert!(
+            shown.iter().any(|p| p.contains("from")),
+            "env dir: {shown:?}"
+        );
+        assert!(
+            shown.iter().any(|p| p.ends_with(".voltd")),
+            "~/.voltd: {shown:?}"
+        );
+        assert!(
+            shown.iter().any(|p| p.ends_with(".zeroclaw")),
+            "~/.zeroclaw: {shown:?}"
+        );
+        // An unset variable contributes nothing rather than an empty path.
+        assert_eq!(local.len(), 4, "{shown:?}");
+    }
+
+    #[test]
+    fn local_config_dirs_put_the_new_naming_first() {
+        let dirs = local_config_dirs(|_| None, Some(std::path::PathBuf::from("/home/u")));
+        let shown: Vec<String> = dirs.iter().map(|p| p.display().to_string()).collect();
+        let voltd = shown.iter().position(|p| p.ends_with(".voltd")).unwrap();
+        let zeroclaw = shown.iter().position(|p| p.ends_with(".zeroclaw")).unwrap();
+        assert!(voltd < zeroclaw, "{shown:?}");
     }
 
     #[test]
