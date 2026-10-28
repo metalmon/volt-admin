@@ -84,10 +84,24 @@ fn is_safe_ssh_word(word: &str) -> bool {
 /// None of them belong in a path or a one-line command.
 fn has_hidden_characters(s: &str) -> bool {
     s.chars().any(|c| {
-        c.is_control()
+        c.is_control() // Cc, newlines included
             || matches!(c,
-                '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+                '\u{00ad}'                 // soft hyphen
+                | '\u{061c}'               // Arabic letter mark
+                | '\u{2028}' | '\u{2029}'  // line / paragraph separators: CSS breaks on these
+                | '\u{200b}'..='\u{200f}'  // zero-width space … RTL mark
+                | '\u{202a}'..='\u{202e}'  // bidi embeddings and overrides
+                | '\u{2060}'..='\u{2064}'  // word joiner, invisible operators
+                | '\u{2066}'..='\u{206f}'  // bidi isolates, deprecated formatting
+                | '\u{feff}'               // zero-width no-break space
+                | '\u{fff9}'..='\u{fffb}'  // interlinear annotation
+                | '\u{e0000}'..='\u{e007f}' // tag characters: a whole hidden string
+            )
     })
+    // Not rejected: ordinary right-to-left letters. They can reorder a
+    // display too, but a launcher used in several languages must not refuse
+    // Arabic or Hebrew text in a path; the overrides and isolates that make
+    // reordering *arbitrary* are what is blocked above.
 }
 
 /// A UNC or device path (`\\host\share`, `//host/share`, `\\?\…`, `\\.\…`).
@@ -315,6 +329,10 @@ mod tests {
             "echo ok\nrm -rf /",
             "echo ok\u{202e}rm -rf /",
             "echo\u{200b}ok; rm -rf /",
+            "echo ok\u{2028}rm -rf /",   // CSS breaks the line on this one
+            "echo ok\u{2060}; rm -rf /", // word joiner
+            "echo ok\u{e0041}",          // tag character: a hidden string
+            "echo ok\u{00ad}rm -rf /",   // soft hyphen
         ] {
             let p = Profile {
                 paircode_command: Some(command.into()),
