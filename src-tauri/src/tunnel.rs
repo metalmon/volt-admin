@@ -624,18 +624,24 @@ pub async fn run_ssh_command(
         Ok(child) => crate::pair::collect_output(child, timeout).await,
         Err(e) => Err(e),
     };
-    let tail: String = result
-        .as_ref()
-        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
-        .unwrap_or_else(|e| e.clone());
-    let tail: String = tail.chars().take(160).collect();
+    // NEVER the command's output: one caller of this is
+    // `pair::fetch_admin_token`, whose output IS the gateway admin token, and
+    // another mints a pairing code. Both would land in a plain-text file on
+    // disk. On failure the error is ours (ssh's own diagnostics), not the
+    // remote command's stdout, so it is safe to keep.
     logx::log(
         "tunnel",
-        &format!(
-            "run_ssh_command elapsed_ms={} result={} tail={tail}",
-            started.elapsed().as_millis(),
-            if result.is_ok() { "ok" } else { "err" }
-        ),
+        &match &result {
+            Ok(_) => format!(
+                "run_ssh_command elapsed_ms={} result=ok",
+                started.elapsed().as_millis()
+            ),
+            Err(e) => format!(
+                "run_ssh_command elapsed_ms={} result=err: {}",
+                started.elapsed().as_millis(),
+                e.chars().take(160).collect::<String>()
+            ),
+        },
     );
     if let Some(path) = askpass_path {
         let _ = std::fs::remove_file(path);
