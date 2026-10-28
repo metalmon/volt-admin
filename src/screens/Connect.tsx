@@ -391,7 +391,16 @@ export default function Connect() {
                   <div className="flex shrink-0 items-center gap-2">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="outline" aria-label={t('card.menu')} className="px-2.5">
+                        <Button
+                          variant="outline"
+                          aria-label={t('card.menu')}
+                          // No 3px glow here: closing the menu returns focus
+                          // to this trigger, so the ring lit up after every
+                          // mouse click. A border highlight still marks the
+                          // trigger for keyboard users (same cue `Select`
+                          // uses) without the halo.
+                          className="px-2.5 focus-visible:border-border-strong focus-visible:ring-0"
+                        >
                           <MenuIcon className="size-4" />
                         </Button>
                       </DropdownMenuTrigger>
