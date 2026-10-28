@@ -155,6 +155,74 @@ fn free_path(dir: &std::path::Path, stem: &str) -> std::path::PathBuf {
         .unwrap_or(first)
 }
 
+/// What the "copy diagnostics" button hands to the clipboard, plus where the
+/// log lives so the UI can reveal it in the file manager.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostics {
+    pub text: String,
+    pub log_path: String,
+}
+
+/// Everything a support conversation starts with, in one paste: app version,
+/// OS, whether an `ssh` client was found, the shape of the saved profiles,
+/// and the tail of the log.
+///
+/// Deliberately absent: passwords, the gateway admin token, pairing codes,
+/// and the contents of any key file — only the key's PATH, which the user
+/// typed themselves. See `docs/specs/diagnostics.md`.
+#[command]
+pub fn collect_diagnostics(app: AppHandle) -> Result<Diagnostics, String> {
+    let profiles = load_profiles(&app)?;
+    let mut text = String::new();
+    text.push_str(&format!(
+        "Volt Admin {} ({} {})\n",
+        app.package_info().version,
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    text.push_str(&format!(
+        "ssh: {}\n",
+        ssh_binary().unwrap_or_else(|| "NOT FOUND on PATH".into())
+    ));
+    text.push_str(&format!("profiles: {}\n", profiles.len()));
+    for p in &profiles {
+        text.push_str(&format!(
+            "  - {} [{:?}] {} panel_port={} auth={:?} local_port={:?} principal={:?}\n",
+            p.name,
+            p.mode,
+            match p.mode {
+                ConnMode::Local => "127.0.0.1".to_string(),
+                ConnMode::Remote => format!("{}@{}:{}", p.user, p.host, p.port),
+            },
+            p.panel_port,
+            p.auth,
+            p.local_port,
+            p.principal
+        ));
+    }
+    let path = logx::path();
+    text.push_str(&format!("log: {}\n\n", path.display()));
+    text.push_str(&logx::tail(50));
+    Ok(Diagnostics {
+        text,
+        log_path: path.to_string_lossy().into_owned(),
+    })
+}
+
+/// The `ssh` the app would spawn for a `Remote` profile, found the way the
+/// OS would: the first match on `PATH`. `None` means `Remote` mode cannot
+/// work on this machine, which is the single most common support answer.
+fn ssh_binary() -> Option<String> {
+    let exe = if cfg!(windows) { "ssh.exe" } else { "ssh" };
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(exe))
+            .find(|candidate| candidate.is_file())
+            .map(|found| found.to_string_lossy().into_owned())
+    })
+}
+
 /// Create or update a connection profile (matched by `id`).
 #[command]
 pub fn save_profile(app: AppHandle, profile: Profile) -> Result<(), String> {

@@ -95,6 +95,7 @@ pub fn run() {
             commands::save_profile,
             commands::parse_profile_doc,
             commands::export_profile_file,
+            commands::collect_diagnostics,
             commands::delete_profile,
             commands::connect,
             commands::disconnect
@@ -108,6 +109,13 @@ pub fn run() {
                 // `disconnect` command can navigate back to the launcher
                 // (captured lazily on the first connect — see commands::StartUrl).
                 app.manage(commands::StartUrl::default());
+
+                // Point the logger at the platform's log directory before
+                // anything can log (it resolves nothing on its own — see
+                // `crate::logx`).
+                if let Ok(dir) = app.path().app_log_dir() {
+                    logx::init(dir.join("debug.log"));
+                }
 
                 // Launcher identity in the title bar (RU brand «Вольт Админ»),
                 // overriding the conf default so it matches the connected title.

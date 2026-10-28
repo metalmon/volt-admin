@@ -158,7 +158,15 @@ export default function Connect() {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   // A short confirmation (where a file was written); errors use `error`.
   const [notice, setNotice] = useState<string | null>(null)
+  // The banner is cleared by the next action; this one is not, so the error
+  // is still on screen when the user goes to copy the diagnostics.
+  const [lastError, setLastError] = useState<string | null>(null)
+  const [diagCopied, setDiagCopied] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (error) setLastError(error)
+  }, [error])
 
   const refresh = async () => {
     try {
@@ -224,6 +232,29 @@ export default function Connect() {
       await refresh()
     } catch (e) {
       setError(importError(String(e)))
+    }
+  }
+
+  /** Collect the support paste: app/OS/ssh/profiles/log tail from Rust, plus
+   *  the error the user is actually looking at. */
+  const copyDiagnostics = async () => {
+    try {
+      const diag = await invoke<{ text: string; logPath: string }>('collect_diagnostics')
+      const text = lastError ? `${t('diag.lastError')} ${lastError}\n\n${diag.text}` : diag.text
+      await navigator.clipboard.writeText(text)
+      setDiagCopied(true)
+      setTimeout(() => setDiagCopied(false), 3000)
+    } catch (e) {
+      setError(t('err.export.clipboard') + ` (${String(e)})`)
+    }
+  }
+
+  const openLogFolder = async () => {
+    try {
+      const diag = await invoke<{ text: string; logPath: string }>('collect_diagnostics')
+      await revealItemInDir(diag.logPath)
+    } catch (e) {
+      setError(t('err.export.file', { e: String(e) }))
     }
   }
 
@@ -779,6 +810,30 @@ export default function Connect() {
           </Button>
         </div>
       )}
+
+      {/* Native <details>: a disclosure that needs no component and no state.
+          Folded away because it is only wanted when something went wrong. */}
+      <details className="mt-auto rounded-[var(--radius)] border border-border px-4 py-3">
+        <summary className="cursor-pointer text-sm text-muted-foreground select-none">
+          {t('diag.title')}
+        </summary>
+        <div className="flex flex-col gap-3 pt-3">
+          <p className="text-xs text-muted-foreground">{t('diag.hint')}</p>
+          {lastError && (
+            <p className="text-xs break-words text-destructive">
+              {t('diag.lastError')} {lastError}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => void copyDiagnostics()}>
+              {diagCopied ? t('diag.copied') : t('diag.copy')}
+            </Button>
+            <Button variant="outline" onClick={() => void openLogFolder()}>
+              {t('diag.openFolder')}
+            </Button>
+          </div>
+        </div>
+      </details>
     </main>
   )
 }

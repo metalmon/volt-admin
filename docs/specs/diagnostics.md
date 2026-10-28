@@ -1,6 +1,6 @@
 # Spec: diagnostics — the log a pilot user can actually hand over
 
-**Status:** approved, not implemented
+**Status:** implemented
 **Owner:** launcher (`logx.rs`, Connect screen)
 
 ## Problem
