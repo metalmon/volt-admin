@@ -121,9 +121,20 @@ two rules:
 1. **No implicit import.** The app never reads a profile that merely happens
    to sit next to the executable, in the Downloads folder, or in the config
    directory. Every import is a user action in the app.
-2. **`paircodeCommand` is shown verbatim in the preview** whenever it is
-   non-empty, under a label saying it will be run on the target machine. The
-   user confirms the command, not just the host.
+2. **The preview shows everything the import decides**: the pairing-code
+   command verbatim whenever non-empty (labelled with *where* it will run —
+   for a `local` profile that is this computer), plus the auth method, key
+   path, principal and tunnel port. What the dialog hides, it grants
+   silently.
+3. **Fields that reach a shell or an argv are constrained**, because an
+   imported document is untrusted input: `user`/`host` may not start with
+   `-` (ssh would read `-oProxyCommand=…` as an option and run it locally)
+   or contain whitespace, `@` or control characters; `principal` is
+   `[A-Za-z0-9_.-]{1,64}`; `keyPath` may not be a UNC or device path (`ssh
+   -i \host\share\key` leaks an NTLM hash to that host); and neither
+   `keyPath` nor `paircodeCommand` may carry newlines, bidi overrides or
+   zero-width characters, which would let the preview render as less than
+   what runs.
 
 Validation happens on the Rust side in `save_profile`'s existing path where
 it can (port ranges, enum values, required fields) so a malformed document
@@ -154,7 +165,10 @@ cannot be written to the store by any route.
   profile instead of adding a second one.
 - A document with a bad port, a bad `mode`, or broken JSON is refused with a
   message naming the problem, and nothing is written to the store.
-- A profile carrying a `paircodeCommand` shows that command in the preview
-  before it can be saved.
+- A profile carrying a `paircodeCommand` shows that command in the preview,
+  with its key path, principal and auth method, before it can be saved.
+- A document whose `host` is `-oProxyCommand=calc.exe`, whose `keyPath` is
+  `\10.0.0.9\share\id`, or whose command hides a second line behind a
+  bidi override is refused by name, on import and on save alike.
 - The kit can ship `profile.json`, and a README line pointing at "import
   profile" replaces the manual seven-field walkthrough.
