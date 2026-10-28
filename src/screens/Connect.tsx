@@ -3,9 +3,18 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { invoke } from '@tauri-apps/api/core'
+import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { MenuIcon } from 'lucide-react'
 import { Card, CardContent, CardFooter } from '@/components/ui/card'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -147,6 +156,8 @@ export default function Connect() {
   // `profile_doc.rs`), so nothing reaches the store before the user sees it.
   const [pending, setPending] = useState<Profile | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  // A short confirmation (where a file was written); errors use `error`.
+  const [notice, setNotice] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const refresh = async () => {
@@ -213,6 +224,20 @@ export default function Connect() {
       await refresh()
     } catch (e) {
       setError(importError(String(e)))
+    }
+  }
+
+  /** Write the profile next to the user's downloads and show them where. */
+  const exportProfileToFile = async (p: Profile) => {
+    try {
+      const path = await invoke<string>('export_profile_file', { id: p.id })
+      setError(null)
+      setNotice(t('export.savedTo', { path }))
+      // Best effort: the path is already on screen if the reveal fails.
+      await revealItemInDir(path).catch(() => {})
+    } catch (e) {
+      setNotice(null)
+      setError(t('err.export.file', { e: String(e) }))
     }
   }
 
@@ -327,6 +352,12 @@ export default function Connect() {
         </div>
       )}
 
+      {notice && (
+        <div className="rounded-[var(--radius)] border border-border bg-card px-4 py-3 text-sm break-all text-muted-foreground shadow-xs">
+          {notice}
+        </div>
+      )}
+
       {loading ? (
         <div className="flex items-center gap-2 text-muted-foreground">
           <Spinner size={18} />
@@ -354,13 +385,38 @@ export default function Connect() {
                   </div>
                   {/* Fluent: secondary/dismissive action on the left, primary
                       (positive) action rightmost. */}
+                  {/* Connect is the everyday action and stays a button; the
+                      rest live behind the menu, so the card keeps room for
+                      the profile's own line however long the host is. */}
                   <div className="flex shrink-0 items-center gap-2">
-                    <Button variant="outline" onClick={() => startEdit(p)} disabled={connectingId !== null}>
-                      {t('btn.edit')}
-                    </Button>
-                    <Button variant="outline" onClick={() => void deleteProfile(p.id)}>
-                      {t('btn.delete')}
-                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" aria-label={t('card.menu')} className="px-2.5">
+                          <MenuIcon className="size-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          disabled={connectingId !== null}
+                          onSelect={() => startEdit(p)}
+                        >
+                          {t('btn.edit')}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void exportProfile(p)}>
+                          {copiedId === p.id ? t('export.copied') : t('btn.export')}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void exportProfileToFile(p)}>
+                          {t('btn.exportFile')}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onSelect={() => void deleteProfile(p.id)}
+                        >
+                          {t('btn.delete')}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                     <Button variant="default" onClick={() => connect(p)} disabled={connectingId !== null}>
                       {connectingId === p.id ? <Spinner size={14} /> : null}
                       {t('btn.connect')}
@@ -671,19 +727,6 @@ export default function Connect() {
                     set-up-another-machine action, and the card's row is for
                     the everyday three. Editing is where you already are when
                     you want to hand this profile to someone. */}
-                {editingId && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="mr-auto"
-                    onClick={() => {
-                      const saved = profiles.find((p) => p.id === editingId)
-                      if (saved) void exportProfile(saved)
-                    }}
-                  >
-                    {copiedId === editingId ? t('export.copied') : t('btn.export')}
-                  </Button>
-                )}
                 <Button type="button" variant="outline" onClick={closeForm}>
                   {t('btn.cancel')}
                 </Button>

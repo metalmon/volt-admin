@@ -38,6 +38,8 @@ const ru: Dict = {
   'btn.importFile': 'Импортировать из файла',
   'btn.importClipboard': 'Вставить из буфера',
   'btn.export': 'Скопировать профиль',
+  'btn.exportFile': 'Сохранить в файл',
+  'card.menu': 'Действия с профилем',
   'pwd.placeholder': 'Пароль SSH',
   'form.editTitle': 'Изменить профиль',
   'form.newTitle': 'Новый профиль',
@@ -67,6 +69,7 @@ const ru: Dict = {
   'import.paircodeWarning.local': 'Команда кода сопряжения — будет выполнена НА ЭТОМ компьютере:',
   'import.confirm': 'Импортировать',
   'export.copied': 'Профиль скопирован в буфер',
+  'export.savedTo': 'Профиль сохранен: {path}',
   'err.load': 'Не удалось загрузить профили: {e}',
   'err.nameRequired': 'Введите название профиля',
   'err.save': 'Не удалось сохранить профиль: {e}',
@@ -78,6 +81,7 @@ const ru: Dict = {
   'err.import.field': 'Поле «{field}» заполнено неверно.',
   'err.import.clipboard': 'Не удалось прочитать буфер обмена — воспользуйтесь импортом из файла.',
   'err.export.clipboard': 'Не удалось записать в буфер обмена.',
+  'err.export.file': 'Не удалось сохранить файл: {e}',
 }
 
 const en: Dict = {
@@ -98,6 +102,8 @@ const en: Dict = {
   'btn.importFile': 'Import from file',
   'btn.importClipboard': 'Paste from clipboard',
   'btn.export': 'Copy profile',
+  'btn.exportFile': 'Save to a file',
+  'card.menu': 'Profile actions',
   'pwd.placeholder': 'SSH password',
   'form.editTitle': 'Edit profile',
   'form.newTitle': 'New profile',
@@ -127,6 +133,7 @@ const en: Dict = {
   'import.paircodeWarning.local': 'Pairing-code command — it will be run ON THIS COMPUTER:',
   'import.confirm': 'Import',
   'export.copied': 'Profile copied to the clipboard',
+  'export.savedTo': 'Profile saved: {path}',
   'err.load': 'Failed to load profiles: {e}',
   'err.nameRequired': 'Enter a profile name',
   'err.save': 'Failed to save profile: {e}',
@@ -138,6 +145,7 @@ const en: Dict = {
   'err.import.field': 'The "{field}" field is not valid.',
   'err.import.clipboard': 'Could not read the clipboard — use the file import instead.',
   'err.export.clipboard': 'Could not write to the clipboard.',
+  'err.export.file': 'Could not save the file: {e}',
 }
 
 const messages: Record<Lang, Dict> = { ru, en }

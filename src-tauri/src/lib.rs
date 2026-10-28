@@ -94,6 +94,7 @@ pub fn run() {
             commands::list_profiles,
             commands::save_profile,
             commands::parse_profile_doc,
+            commands::export_profile_file,
             commands::delete_profile,
             commands::connect,
             commands::disconnect

@@ -97,6 +97,64 @@ fn as_ui_error(reason: String) -> String {
     }
 }
 
+/// Write a saved profile to a JSON file in the user's download directory and
+/// return the full path. No save dialog: that needs another plugin, and the
+/// point here is to hand someone a file — the UI reveals it in the file
+/// manager afterwards (the `opener` plugin already allows that).
+#[command]
+pub fn export_profile_file(app: AppHandle, id: String) -> Result<String, String> {
+    let profiles = load_profiles(&app)?;
+    let profile = profiles
+        .iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "no such profile".to_string())?;
+    let dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().home_dir())
+        .map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(profile).map_err(|e| e.to_string())?;
+    let path = free_path(&dir, &file_stem(&profile.name));
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// A profile name reduced to something every filesystem accepts. Keeps
+/// letters (Cyrillic included), digits, `-` and `_`; everything else becomes
+/// `-`. Empty or all-punctuation names fall back to `profile`.
+fn file_stem(name: &str) -> String {
+    let stem: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let stem = stem.trim_matches('-').to_string();
+    if stem.is_empty() {
+        "profile".to_string()
+    } else {
+        stem.chars().take(64).collect()
+    }
+}
+
+/// `<dir>/<stem>.json`, or `<stem> (2).json`, `(3)`… — exporting twice must
+/// not overwrite the file the user has already sent to someone.
+fn free_path(dir: &std::path::Path, stem: &str) -> std::path::PathBuf {
+    let first = dir.join(format!("{stem}.json"));
+    if !first.exists() {
+        return first;
+    }
+    (2..1000)
+        .map(|n| dir.join(format!("{stem} ({n}).json")))
+        .find(|p| !p.exists())
+        .unwrap_or(first)
+}
+
 /// Create or update a connection profile (matched by `id`).
 #[command]
 pub fn save_profile(app: AppHandle, profile: Profile) -> Result<(), String> {
@@ -323,5 +381,34 @@ pub async fn disconnect<R: Runtime>(
         Some(url) => navigate_main_window(&app, url),
         // Never connected this session → nothing to navigate back to.
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_stem_keeps_letters_and_replaces_the_rest() {
+        assert_eq!(file_stem("VoltSSH"), "VoltSSH");
+        assert_eq!(file_stem("Вольт — бэкенд"), "Вольт---бэкенд");
+        assert_eq!(file_stem(" my/server:2222 "), "my-server-2222");
+    }
+
+    #[test]
+    fn file_stem_never_yields_an_empty_name() {
+        assert_eq!(file_stem("   "), "profile");
+        assert_eq!(file_stem("///"), "profile");
+    }
+
+    #[test]
+    fn free_path_does_not_overwrite_an_existing_export() {
+        let dir = std::env::temp_dir().join(format!("volt-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = free_path(&dir, "srv");
+        assert_eq!(first.file_name().unwrap(), "srv.json");
+        std::fs::write(&first, "{}").unwrap();
+        assert_eq!(free_path(&dir, "srv").file_name().unwrap(), "srv (2).json");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
