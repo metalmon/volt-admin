@@ -97,6 +97,13 @@ fn is_network_or_device_path(path: &str) -> bool {
     // Windows takes `/` and `\` as the same separator, so `\/host\share` and
     // `/\host\share` are UNC too — normalize before looking at the prefix.
     // This also covers `\\?\…` and `\\.\…`, which start with two separators.
+    //
+    // TWO separators, not one: a POSIX key path (`/home/u/.ssh/id_ed25519`)
+    // normalizes to a single leading separator, and this launcher ships on
+    // Linux and macOS as well. The NT-namespace prefixes (`\??\`, `\Device\`)
+    // are left alone for the same reason — they are not reachable through the
+    // Win32 file APIs ssh opens a key with anyway: Win32 resolves a single
+    // leading separator against the current drive (`C:\??\UNC\…`).
     path.trim_start().replace('/', "\\").starts_with("\\\\")
 }
 
@@ -338,12 +345,23 @@ mod tests {
             };
             assert_eq!(p.validate(), Err("keyPath".into()), "{key:?}");
         }
-        let p = Profile {
-            auth: AuthMethod::KeyFile,
-            key_path: Some("~/.ssh/id_ed25519".into()),
-            ..valid()
-        };
-        assert_eq!(p.validate(), Ok(()), "a normal key path must pass");
+        // Every shape a real key path takes must still pass — in particular a
+        // POSIX absolute one, which has a single leading separator: this app
+        // ships on Linux and macOS too.
+        for key in [
+            "~/.ssh/id_ed25519",
+            "/home/volt/.ssh/id_ed25519",
+            "/Users/volt/.ssh/id_ed25519",
+            "C:\\Users\\volt\\.ssh\\id_ed25519",
+            ".ssh/id_ed25519",
+        ] {
+            let p = Profile {
+                auth: AuthMethod::KeyFile,
+                key_path: Some(key.into()),
+                ..valid()
+            };
+            assert_eq!(p.validate(), Ok(()), "a real key path must pass: {key:?}");
+        }
     }
 
     #[test]
