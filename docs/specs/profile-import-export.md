@@ -140,6 +140,32 @@ Validation happens on the Rust side in `save_profile`'s existing path where
 it can (port ranges, enum values, required fields) so a malformed document
 cannot be written to the store by any route.
 
+## Known limitation: profiles share one webview origin
+
+Accepted deliberately, recorded so the next reader does not have to
+rediscover it.
+
+A connected panel lives at `http://127.0.0.1:<local port>`, and the webview
+keys its storage — the panel's session among it — by that origin. Two
+profiles that end up on the same local port therefore share that storage: an
+imported profile whose `localPort` is set to another profile's port can,
+once the user connects to it, read what the other panel left there. The same
+origin is also what `crate::pair` checks before injecting the gateway admin
+token into the page (`window.__voltAdminToken`), so a collision hands that
+token to whatever is answering on the port.
+
+What holds today: importing is explicit and the preview shows the tunnel
+port, and both profiles have to be ones the user chose to connect to.
+
+What would actually fix it, in increasing order of work: refuse a profile
+whose explicit `localPort` equals another saved profile's port (partial — an
+auto-picked port is derived from the profile id, so a collision can still be
+engineered); give each profile its own webview data directory, so no two
+panels ever share storage; and stop handing the page a long-lived
+credential at all — the panel's "connect a device" button can ask for a
+result the way `PROBE_SCRIPT` already does, by navigating to a marker the
+app answers with a freshly minted one-time code, leaving the token in Rust.
+
 ## Out of scope
 
 - `volt-admin://` deep links (needs protocol registration in the installer).
