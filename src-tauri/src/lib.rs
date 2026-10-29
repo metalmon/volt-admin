@@ -105,9 +105,15 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 // Multi-copy model: no tray. Closing the window quits this
-                // copy, and the `Registry` goes down with it — every
-                // `Connection` it holds drops, and each tunnel's own Drop
-                // kills its ssh child (see `crate::registry`). The only
+                // copy. Its ssh children die with it, but NOT through Rust's
+                // Drop — `Builder::run` ends the process with
+                // `std::process::exit`, which runs no destructor. What reaps
+                // them is the OS-level guard each child is given at spawn: a
+                // Job Object on Windows, `PR_SET_PDEATHSIG` on Linux, a
+                // watchdog process on macOS (`crate::tunnel::child_guard`).
+                // The `Registry`'s own Drop matters while the app RUNS —
+                // releasing a connection is what tears its tunnel down. The
+                // only
                 // state we still register is the StartUrl holder so the
                 // `disconnect` command can navigate back to the launcher
                 // (captured lazily on the first connect — see commands::StartUrl).

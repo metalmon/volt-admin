@@ -10,6 +10,11 @@
 //! `Tunnel`'s own `Drop` kills the ssh child. Nothing here needs to kill a
 //! process itself; it only needs to never leak a `Tunnel` it removed.
 //!
+//! That is the RUNNING app. Quitting is not this module's job and does not
+//! go through here at all: `Builder::run` exits the process without running
+//! destructors, and the children are reaped by the OS-level guard they get
+//! at spawn (`crate::tunnel::child_guard`).
+//!
 //! A `Local` profile is an ordinary entry with `tunnel: None`: there is no
 //! ssh child, but there is still a connection to hold, so nothing
 //! downstream has to special-case the mode.
@@ -32,6 +37,16 @@ pub enum Holder {
     Monitor,
 }
 
+/// What [`Registry::hold`] tells a caller about a connection it joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Held {
+    /// Where the panel answers on this machine.
+    pub local_port: u16,
+    /// The tunnel runs on the built-in ssh client, which cannot exec — see
+    /// `crate::pair`. Always false for `Local`.
+    pub embedded: bool,
+}
+
 /// One live connection to a gateway.
 pub struct Connection {
     /// `None` for `Local` profiles, which reach the panel on loopback.
@@ -42,6 +57,9 @@ pub struct Connection {
     pub tunnel: Option<Tunnel>,
     /// Where the panel answers on this machine.
     pub local_port: u16,
+    /// Carried so a REUSED connection still reports how it is served:
+    /// pairing and the admin-token read branch on it.
+    embedded: bool,
     holders: HashSet<Holder>,
     /// Test-only payload, so a test can prove a `Connection` really was
     /// dropped without building a `Tunnel` (which would spawn `ssh`).
@@ -52,36 +70,59 @@ pub struct Connection {
 }
 
 /// Tauri-managed state: every connection this app currently holds open.
+///
+/// The second mutex serializes `connect`: publishing a connection and
+/// releasing the previous one must be one atomic step, or two connects
+/// racing each other release what the other just published.
 #[derive(Default)]
-pub struct Registry(Mutex<HashMap<String, Connection>>);
+pub struct Registry(Mutex<HashMap<String, Connection>>, Mutex<()>);
 
 impl Registry {
     /// Add `holder` to an existing connection and return where its panel
     /// answers. `None` means there is no connection for `profile_id` yet and
     /// the caller has to open one.
-    pub async fn hold(&self, profile_id: &str, holder: Holder) -> Option<u16> {
+    pub async fn hold(&self, profile_id: &str, holder: Holder) -> Option<Held> {
         let mut map = self.0.lock().await;
         let conn = map.get_mut(profile_id)?;
         conn.holders.insert(holder);
-        Some(conn.local_port)
+        Some(Held {
+            local_port: conn.local_port,
+            embedded: conn.embedded,
+        })
     }
 
-    /// Register a connection that is ready to use, held by `holder`. Any
-    /// previous entry for this profile is replaced, and dropped with it.
+    /// Hold this for the whole of a `connect`. Two connects that overlap
+    /// would otherwise each publish and then release the other's connection,
+    /// killing an ssh child the other has already handed to the webview.
+    pub async fn connect_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.1.lock().await
+    }
+
+    /// Register a connection that is ready to use, held by `holder`. A
+    /// previous entry for this profile is replaced — but its OTHER holders
+    /// are carried over, or a window connecting to a profile a watcher is
+    /// already holding would drop the watcher's claim.
     pub async fn publish(
         &self,
         profile_id: &str,
         tunnel: Option<Tunnel>,
         local_port: u16,
+        embedded: bool,
         holder: Holder,
     ) {
         let mut map = self.0.lock().await;
+        let mut holders = map
+            .get(profile_id)
+            .map(|c| c.holders.clone())
+            .unwrap_or_default();
+        holders.insert(holder);
         map.insert(
             profile_id.to_string(),
             Connection {
                 tunnel,
                 local_port,
-                holders: HashSet::from([holder]),
+                embedded,
+                holders,
                 #[cfg(test)]
                 probe: None,
             },
@@ -153,6 +194,7 @@ impl Registry {
             Connection {
                 tunnel: None,
                 local_port,
+                embedded: false,
                 holders: HashSet::from([holder]),
                 probe: Some(probe),
             },
@@ -182,7 +224,8 @@ mod tests {
     async fn registry_with(ids: &[&str]) -> Registry {
         let r = Registry::default();
         for (i, id) in ids.iter().enumerate() {
-            r.publish(id, None, 9000 + i as u16, Holder::Window).await;
+            r.publish(id, None, 9000 + i as u16, false, Holder::Window)
+                .await;
         }
         r
     }
@@ -190,13 +233,16 @@ mod tests {
     #[tokio::test]
     async fn hold_on_an_unknown_profile_is_none() {
         let r = Registry::default();
-        assert_eq!(r.hold("nope", Holder::Window).await, None);
+        assert!(r.hold("nope", Holder::Window).await.is_none());
     }
 
     #[tokio::test]
     async fn publish_then_hold_returns_the_local_port() {
         let r = registry_with(&["a"]).await;
-        assert_eq!(r.hold("a", Holder::Monitor).await, Some(9000));
+        assert_eq!(
+            r.hold("a", Holder::Monitor).await.map(|h| h.local_port),
+            Some(9000)
+        );
         assert_eq!(r.local_port("a").await, Some(9000));
     }
 
@@ -243,10 +289,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_keeps_a_holder_that_is_already_there() {
+        // A watcher holding a connection must survive the window connecting
+        // to the same profile, or phase 3 kills its own tunnel.
+        let r = registry_with(&["a"]).await;
+        r.hold("a", Holder::Monitor).await;
+        r.publish("a", None, 9100, false, Holder::Window).await;
+        assert!(
+            !r.release("a", Holder::Window).await,
+            "the monitor hold must still be there"
+        );
+        assert_eq!(r.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn hold_reports_whether_the_tunnel_is_embedded() {
+        // `embedded` decides whether pairing can exec on the far side
+        // (`crate::pair`); a reused connection must not look like a system
+        // ssh when it is the built-in client.
+        let r = Registry::default();
+        r.publish("a", None, 9000, true, Holder::Window).await;
+        let held = r.hold("a", Holder::Window).await.expect("held");
+        assert_eq!(held.local_port, 9000);
+        assert!(held.embedded, "the flag must survive the reuse path");
+    }
+
+    #[tokio::test]
+    async fn the_connect_lock_serializes_two_callers() {
+        // Two connects racing used to release each other's connection; the
+        // lock is what makes "publish, then release the others" atomic.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let registry = std::sync::Arc::new(Registry::default());
+        let inside = std::sync::Arc::new(AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let (r, inside, peak) = (registry.clone(), inside.clone(), peak.clone());
+            tasks.push(tokio::spawn(async move {
+                let _guard = r.connect_lock().await;
+                let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                inside.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 1, "two connects overlapped");
+    }
+
+    #[tokio::test]
     async fn dropping_the_registry_drops_every_connection() {
-        // The app quitting must take every ssh child with it, which it does
-        // by dropping the map. A real `Tunnel` cannot be built in a test, so
-        // the proof is a payload whose `Weak` dies with its `Connection`.
+        // Releasing a connection must really drop it, not just forget it in
+        // a map that keeps growing — the `Tunnel` inside is what holds an
+        // ssh child. A real `Tunnel` cannot be built in a test, so the proof
+        // is a payload whose `Weak` dies with its `Connection`. (App EXIT is
+        // a different mechanism entirely — see the module docs.)
         let payloads: Vec<std::sync::Arc<()>> = (0..3).map(|_| std::sync::Arc::new(())).collect();
         let weak: Vec<std::sync::Weak<()>> =
             payloads.iter().map(std::sync::Arc::downgrade).collect();
@@ -267,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn publish_twice_for_one_id_leaves_one_entry() {
         let r = registry_with(&["a"]).await;
-        r.publish("a", None, 9100, Holder::Window).await;
+        r.publish("a", None, 9100, false, Holder::Window).await;
         assert_eq!(r.len().await, 1);
         assert_eq!(r.local_port("a").await, Some(9100), "the newer one wins");
     }

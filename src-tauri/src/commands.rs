@@ -7,7 +7,7 @@
 use crate::connection::{ConnMode, Profile};
 use crate::logx;
 use crate::pair::{self, PairContext, PairState};
-use crate::registry::{Holder, Registry};
+use crate::registry::{Held, Holder, Registry};
 use crate::tunnel::{self, Lang};
 use serde::Serialize;
 use tauri::{command, AppHandle, Manager, Runtime, State};
@@ -262,8 +262,9 @@ pub struct ConnectResult {
 /// on load only if it has no session (see `crate::pair`).
 ///
 /// - `Local` mode never opens a tunnel: it uses the direct panel URL.
-/// - `Remote` mode opens an SSH `-L` tunnel (tearing down any previously
-///   active tunnel first) and uses the tunnel's local URL.
+/// - `Remote` mode opens an SSH `-L` tunnel and uses its local URL. The
+///   previous connection is released only AFTER the new one is published,
+///   so a failed attempt leaves the working one alone (`crate::registry`).
 ///
 /// `password` is only used for `AuthMethod::Password` profiles and is
 /// never persisted — see `crate::tunnel`.
@@ -296,21 +297,34 @@ pub async fn connect<R: Runtime>(
     // `endpoint` (IP:port) feeds the OS window title so the copy shows which
     // instance it is connected to. Local = the direct 127.0.0.1:panel_port;
     // Remote = the actual remote host:panel_port (not the local tunnel port).
+    // One connect at a time: publishing a connection and releasing the
+    // previous one is one step, and two overlapping connects would otherwise
+    // release what the other just handed to the webview.
+    let _connecting = registry.connect_lock().await;
+
     // Already connected to this profile (another holder, or the window
     // reconnecting): reuse it rather than opening a second tunnel.
-    let mut embedded = false;
     let mut tunnel_opt: Option<tunnel::Tunnel> = None;
-    let held_port = registry.hold(&profile.id, Holder::Window).await;
-    if let Some(port) = held_port {
-        logx::log("connect", &format!("reusing connection on port {port}"));
+    let held = registry.hold(&profile.id, Holder::Window).await;
+    // Whether the connection is served by the built-in ssh client decides
+    // how pairing reaches the far side — a reused one knows its own answer.
+    let mut embedded = held.as_ref().is_some_and(|h: &Held| h.embedded);
+    if let Some(h) = &held {
+        logx::log(
+            "connect",
+            &format!(
+                "reusing connection on port {} embedded={}",
+                h.local_port, h.embedded
+            ),
+        );
     }
-    let (base_url, endpoint) = match (held_port, profile.mode) {
-        (Some(port), ConnMode::Local) => (
-            format!("http://127.0.0.1:{port}"),
+    let (base_url, endpoint) = match (&held, profile.mode) {
+        (Some(h), ConnMode::Local) => (
+            format!("http://127.0.0.1:{}", h.local_port),
             format!("127.0.0.1:{}", profile.panel_port),
         ),
-        (Some(port), ConnMode::Remote) => (
-            format!("http://127.0.0.1:{port}"),
+        (Some(h), ConnMode::Remote) => (
+            format!("http://127.0.0.1:{}", h.local_port),
             format!("{}:{}", profile.host, profile.panel_port),
         ),
         (None, ConnMode::Local) => (
@@ -365,13 +379,20 @@ pub async fn connect<R: Runtime>(
     // previous one only after that: every `return Err` above happens while
     // the connection the user already had is still up, so a failed attempt
     // no longer costs them the one that worked.
-    if held_port.is_none() {
+    let reused = held.is_some();
+    if !reused {
         let local_port = match &tunnel_opt {
             Some(tun) => tun.local_port,
             None => profile.panel_port,
         };
         registry
-            .publish(&profile.id, tunnel_opt, local_port, Holder::Window)
+            .publish(
+                &profile.id,
+                tunnel_opt,
+                local_port,
+                embedded,
+                Holder::Window,
+            )
             .await;
     }
     let dropped = registry
@@ -380,7 +401,10 @@ pub async fn connect<R: Runtime>(
         .len();
     logx::log(
         "connect",
-        &format!("connection published, {dropped} previous released"),
+        &format!(
+            "connection {}, {dropped} previous released",
+            if reused { "reused" } else { "published" }
+        ),
     );
 
     // The gateway admin token for the panel's own "connect a new device"
