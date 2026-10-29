@@ -161,11 +161,10 @@ impl Registry {
         false
     }
 
-    /// Release every window's hold, whichever window. A `Monitor` hold keeps
-    /// its connection alive.
-    pub async fn release_all_windows(&self) -> Vec<String> {
-        self.release_matching(|h| matches!(h, Holder::Window(_)), |_| true)
-            .await
+    /// Release one holder's claim everywhere — how a window that is closing
+    /// lets go of whatever it was showing.
+    pub async fn release_all_for(&self, holder: &Holder) -> Vec<String> {
+        self.release_matching(move |h| h == holder, |_| true).await
     }
 
     /// [`Self::release_all`], except for `keep` — how a window moving from
@@ -301,9 +300,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_all_windows_reports_every_id_it_dropped() {
+    async fn releasing_a_window_reports_every_id_it_dropped() {
         let r = registry_with(&["a", "b"]).await;
-        let mut dropped = r.release_all_windows().await;
+        let mut dropped = r.release_all_for(&window("w1")).await;
         dropped.sort();
         assert_eq!(dropped, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(r.len().await, 0);
@@ -347,13 +346,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_all_windows_leaves_a_monitor_hold() {
+    async fn a_closing_window_leaves_a_monitor_hold_standing() {
         let r = Registry::default();
         r.publish("a", None, 9000, false, "fp", window("w1")).await;
         r.hold("a", "fp", Holder::Monitor).await;
-        r.publish("b", None, 9001, false, "fp", window("w2")).await;
-        let mut dropped = r.release_all_windows().await;
-        dropped.sort();
+        r.publish("b", None, 9001, false, "fp", window("w1")).await;
+        let dropped = r.release_all_for(&window("w1")).await;
         assert_eq!(dropped, vec!["b".to_string()], "only b had no other holder");
         assert_eq!(r.local_port("a").await, Some(9000), "the monitor keeps a");
     }

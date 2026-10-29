@@ -44,14 +44,11 @@ impl StartUrl {
     }
 }
 
-/// Navigate the main window's webview to `url`, top-level (not an iframe).
-/// The daemon panel serves `Content-Security-Policy: frame-ancestors
-/// 'none'`, which blocks framing but not top-level navigation — so this is
-/// how the connected panel is shown instead of an `<iframe>`.
-fn navigate_main_window<R: Runtime>(app: &AppHandle<R>, url: tauri::Url) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
+/// Navigate one window's webview to `url`, top-level (not an iframe). The
+/// daemon panel serves `Content-Security-Policy: frame-ancestors 'none'`,
+/// which blocks framing but not top-level navigation — so this is how the
+/// connected panel is shown instead of an `<iframe>`.
+fn navigate<R: Runtime>(window: &tauri::WebviewWindow<R>, url: tauri::Url) -> Result<(), String> {
     window.navigate(url).map_err(|e| e.to_string())
 }
 
@@ -271,6 +268,7 @@ pub struct ConnectResult {
 #[command]
 pub async fn connect<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     profile: Profile,
     password: Option<String>,
     lang: Option<String>,
@@ -301,9 +299,9 @@ pub async fn connect<R: Runtime>(
     // previous one is one step, and two overlapping connects would otherwise
     // release what the other just handed to the webview.
     let _connecting = registry.connect_lock().await;
-    // Phase 2 gives each window its own label; until then every connect
-    // comes from the one window the app has.
-    let window_label = "main".to_string();
+    // Each window holds its own connection, so the hold is named after the
+    // window that asked for it.
+    let window_label = window.label().to_string();
 
     // Already connected to this profile (another holder, or the window
     // reconnecting): reuse it rather than opening a second tunnel.
@@ -455,10 +453,8 @@ pub async fn connect<R: Runtime>(
     // Capture the app-entry URL (the Connect screen the webview is currently
     // showing) before we navigate away, so `disconnect` knows where to go
     // back to. Lazy + once — see `StartUrl`.
-    if let Some(window) = app.get_webview_window("main") {
-        if let Ok(current) = window.url() {
-            app.state::<StartUrl>().capture(current);
-        }
+    if let Ok(current) = window.url() {
+        app.state::<StartUrl>().capture(current);
     }
 
     // The panel entry point is the daemon's ROOT: its SPA fallback serves
@@ -468,12 +464,10 @@ pub async fn connect<R: Runtime>(
     let panel_url = format!("{}/", base_url.trim_end_matches('/'));
     logx::log("connect", &format!("navigate to {panel_url}"));
     let url = tauri::Url::parse(&panel_url).map_err(|e| e.to_string())?;
-    navigate_main_window(&app, url)?;
+    navigate(&window, url)?;
 
-    // Connection identity in the OS title bar (per copy/window).
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title(&format!("{} ({}) — Вольт Админ", profile.name, endpoint));
-    }
+    // Connection identity in the OS title bar, per window.
+    let _ = window.set_title(&format!("{} ({}) — Вольт Админ", profile.name, endpoint));
 
     logx::log("connect", "done");
     Ok(ConnectResult { base_url })
@@ -486,28 +480,34 @@ pub async fn connect<R: Runtime>(
 /// panel regardless of mode.
 #[command]
 pub async fn disconnect<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     registry: State<'_, Registry>,
     start_url: State<'_, StartUrl>,
     pair_state: State<'_, PairState>,
 ) -> Result<(), String> {
     // The window lets go of whatever it was showing; a connection nobody
     // else holds goes down with its ssh child (see `crate::registry`).
-    let dropped = registry.release_all_windows().await;
+    // Only THIS window lets go: another window may be showing the same
+    // panel, and a watcher may be holding the same connection.
+    let dropped = registry
+        .release_all_for(&Holder::Window(window.label().to_string()))
+        .await;
     logx::log(
         "disconnect",
-        &format!("released {} connection(s)", dropped.len()),
+        &format!(
+            "window {} released {} connection(s)",
+            window.label(),
+            dropped.len()
+        ),
     );
     // Forget the connection's pairing context (and with it the password).
     pair_state.clear();
 
     // Back to the launcher identity in the title bar.
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title("Вольт Админ");
-    }
+    let _ = window.set_title("Вольт Админ");
 
     match start_url.get() {
-        Some(url) => navigate_main_window(&app, url),
+        Some(url) => navigate(&window, url),
         // Never connected this session → nothing to navigate back to.
         None => Ok(()),
     }

@@ -91,6 +91,30 @@ pub fn run() {
                 let _ = webview.eval(&script);
             });
         })
+        // A window closed with the X button never calls `disconnect`, so its
+        // hold would keep an ssh child alive until the app quits. Releasing
+        // here is what makes a connection outlive only the windows that
+        // still want it.
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::Destroyed) {
+                return;
+            }
+            let holder = registry::Holder::Window(window.label().to_string());
+            let app = window.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let dropped = app
+                    .state::<registry::Registry>()
+                    .release_all_for(&holder)
+                    .await;
+                logx::log(
+                    "window",
+                    &format!(
+                        "{holder:?} destroyed, released {} connection(s)",
+                        dropped.len()
+                    ),
+                );
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,
             commands::save_profile,
