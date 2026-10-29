@@ -489,6 +489,31 @@ pub async fn connect<R: Runtime>(
         &format!("admin_token is_some={}", admin_token.is_some()),
     );
 
+    // Pair BEFORE navigating, so the panel's first load is already signed
+    // in: no pairing form, no reload, and its language comes from the
+    // server rather than from the webview's idea of one. Best effort — a
+    // failure leaves `session_token` empty and the page-driven fallback
+    // (probe, then mint on demand) takes over.
+    let session_token = match pair::mint_code(&profile, password.as_deref(), embedded, lang).await {
+        Ok(code) => match pair::origin_of(&base_url) {
+            Some(origin) => match pair::redeem_code(&origin, &code).await {
+                Ok(token) => {
+                    logx::log("connect", "paired up front");
+                    Some(token)
+                }
+                Err(reason) => {
+                    logx::log("connect", &format!("redeem failed: {reason}"));
+                    None
+                }
+            },
+            None => None,
+        },
+        Err(reason) => {
+            logx::log("connect", &format!("mint up front failed: {reason}"));
+            None
+        }
+    };
+
     // Remember what a pairing code for this connection would need, so the
     // page-load hook can mint one on demand (see `crate::pair::PairContext`
     // for the password's lifetime). Set before navigating: the first page
@@ -501,6 +526,7 @@ pub async fn connect<R: Runtime>(
             embedded,
             lang,
             admin_token,
+            session_token,
         });
     }
 

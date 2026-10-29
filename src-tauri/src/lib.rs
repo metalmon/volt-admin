@@ -68,6 +68,17 @@ pub fn run() {
         // code only without a session); a `/?volt_pair=1` load gets a freshly
         // minted code — or a banner saying why there is none.
         .on_page_load(|webview, payload| {
+            // STARTED is WebView2's `ContentLoading`: early enough to hand
+            // the panel its session before its own scripts look for one.
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                if let Some(ctx) = webview.state::<pair::PairState>().for_url(payload.url()) {
+                    if let Some(token) = &ctx.session_token {
+                        let _ = webview.eval(pair::session_script(token));
+                        logx::log("page_load", "session handed over before scripts");
+                    }
+                }
+                return;
+            }
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
             }
@@ -79,6 +90,11 @@ pub fn run() {
             logx::log("page_load", "panel origin matched");
             if let Some(token) = &ctx.admin_token {
                 let _ = webview.eval(pair::token_script(token));
+            }
+            if ctx.session_token.is_some() {
+                // Already signed in by `connect`; the probe exists only for
+                // the fallback path and would cost a navigation.
+                return;
             }
             if !pair::is_pair_request(payload.url()) {
                 let _ = webview.eval(pair::PROBE_SCRIPT);

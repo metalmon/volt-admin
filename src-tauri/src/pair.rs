@@ -72,6 +72,10 @@ pub struct PairContext {
     /// The gateway admin token read from the gateway machine at connect time
     /// (see the module docs); `None` when it could not be read.
     pub admin_token: Option<String>,
+    /// A session token this app paired for itself before navigating, handed
+    /// to the panel before its own scripts run. `None` means pairing could
+    /// not be done up front and the page-driven fallback is in play.
+    pub session_token: Option<String>,
 }
 
 /// Tauri-managed state: one context per connected panel, keyed by its
@@ -220,6 +224,50 @@ fn which_on_path(name: &str) -> Option<String> {
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
         .map(|found| found.to_string_lossy().into_owned())
+}
+
+/// How this app names itself in the gateway's device list.
+const DEVICE_NAME: &str = "Volt Admin";
+
+/// Redeem a pairing code for a session token, the way a person typing the
+/// code into the panel would (`POST /api/pair`).
+///
+/// Doing it HERE rather than in the page is what makes a connect one page
+/// load instead of three: the panel used to be asked whether it had a
+/// session (a navigation), told to fetch a code (another), and reloaded
+/// after redeeming (a third) — which is the flicker, and the reason its
+/// pairing form appeared in the wrong language before the server could say
+/// otherwise.
+///
+/// Plain HTTP on loopback: the panel binds `127.0.0.1` and a `Remote`
+/// profile reaches it through the tunnel, so there is no TLS here and
+/// `reqwest` carries no TLS stack.
+pub async fn redeem_code(origin: &str, code: &str) -> Result<String, String> {
+    let body = serde_json::json!({
+        "code": code,
+        "device_name": DEVICE_NAME,
+        "device_type": "desktop",
+    });
+    let response = reqwest::Client::new()
+        .post(format!("{origin}/api/pair"))
+        .json(&body)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("pair request: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("pair returned {}", response.status()));
+    }
+    let answer: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("pair answer: {e}"))?;
+    answer
+        .get("token")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "pair answer carried no token".to_string())
 }
 
 /// Mint a pairing code on the gateway machine. `embedded` = the tunnel runs
@@ -528,6 +576,18 @@ body:JSON.stringify({{code:'{code}',device_name:'Volt Admin',device_type:'browse
     )
 }
 
+/// Put a session token where the panel looks for one, BEFORE its scripts
+/// run (evaluated on `PageLoadEvent::Started`, which on Windows is
+/// WebView2's `ContentLoading`). The panel then boots already signed in:
+/// no pairing form, no reload, and its language comes from the server on
+/// the first paint.
+pub fn session_script(token: &str) -> String {
+    format!(
+        "(function(){{try{{var K='zeroclaw_token';if(!localStorage.getItem(K))localStorage.setItem(K,'{token}');}}catch(e){{}}}})();",
+        token = js_str(token)
+    )
+}
+
 /// A small dismissable banner explaining why auto-pairing did not happen;
 /// the panel's own pairing prompt stays usable underneath.
 pub fn warning_script(text: &str) -> String {
@@ -739,6 +799,7 @@ mod tests {
             embedded: false,
             lang: Lang::Ru,
             admin_token: None,
+            session_token: None,
         }
     }
 
@@ -771,6 +832,15 @@ mod tests {
         let kept = tauri::Url::parse("http://127.0.0.1:41002/").unwrap();
         assert!(state.for_url(&gone).is_none());
         assert!(state.for_url(&kept).is_some());
+    }
+
+    #[test]
+    fn the_session_script_only_writes_when_there_is_nothing_there() {
+        // Overwriting would log the panel out of a session it already has;
+        // and a quote in the token must not end the literal early.
+        let script = session_script("a'b");
+        assert!(script.contains("if(!localStorage.getItem(K))"), "{script}");
+        assert!(script.contains(r"'a\'b'"), "{script}");
     }
 
     #[test]
@@ -814,6 +884,7 @@ To add another client use --new, or revoke existing pairings and issue a fresh c
             embedded: false,
             lang: Lang::Ru,
             admin_token: Some("tok".into()),
+            session_token: None,
         });
         let other = tauri::Url::parse("http://127.0.0.1:2/").unwrap();
         assert!(state.for_url(&other).is_none());

@@ -5222,6 +5222,7 @@ name = "volt-admin"
 version = "0.1.5"
 dependencies = [
  "libc",
+ "reqwest",
  "russh",
  "serde",
  "serde_json",
