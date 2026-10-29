@@ -19,6 +19,26 @@ couple of servers and does not happen at night at all.
 This is not about the launcher's own errors. Those are already on screen and
 in `docs/specs/diagnostics.md`.
 
+## Why this exists at all, when voltd can already export
+
+voltd ships the usual ways out: `[observability] backend` takes
+`none | log | verbose | prometheus | otel`. With `otel` it pushes to any
+OTLP collector (`otel_endpoint`, service name, auth headers — all config),
+outbound, so no inbound access to the gateway is needed; with `prometheus`
+the gateway answers `GET /metrics`.
+
+**Where a collector exists, this feature should not.** A real monitoring
+system has history, alert rules, deduplication, routing, escalation and
+on-call — and it does not stop working when an administrator closes their
+laptop. Pointing `otel_endpoint` at it is config plus documentation, and it
+beats anything built here.
+
+This exists for the deployments that have none of that: a laptop, a handful
+of containers, a panel bound to loopback, and a person who needs to find
+out promptly that something wants their attention. That is the whole scope.
+The moment a customer stands up a collector, the answer for them is the
+collector.
+
 ## Goal
 
 Volt Admin keeps watching every profile the administrator marks, with its
@@ -47,6 +67,20 @@ parsed out of a text log (checked in the voltd sources,
 Which kills the alternatives: no `tail -F` over SSH, no ANSI to strip, no
 `voltd` process per poll, and no gRPC — the relay protocol is for other
 traffic, this is plain HTTP on the panel port the app already reaches.
+
+### A session token per profile is already overdue
+
+Pairing now happens in `connect`, before the webview navigates (see
+`crate::pair::redeem_code`) — which is what made a connect one page load
+instead of three. But it mints and redeems a code EVERY time, and every
+successful redeem adds a token hash to the gateway's `[gateway]
+paired_tokens`. Connecting daily grows that list, and the panel's device
+list, without bound.
+
+So storing the session token per profile is not a cost this feature
+introduces — it is a fix the app already needs. `connect` should pair only
+when it has no token for the profile, or when the one it has stops being
+accepted (`401`).
 
 ### Authentication, and the one new secret
 
