@@ -74,26 +74,38 @@ pub struct PairContext {
     pub admin_token: Option<String>,
 }
 
-/// Tauri-managed state: the context of the active connection, if any.
+/// Tauri-managed state: one context per connected panel, keyed by its
+/// origin. Several windows can be connected at once, each to its own
+/// gateway, and a page load has to find the context belonging to the panel
+/// it came from — not whichever connected last.
 #[derive(Default)]
-pub struct PairState(pub Mutex<Option<PairContext>>);
+pub struct PairState(pub Mutex<std::collections::HashMap<String, PairContext>>);
 
 impl PairState {
+    /// Remember the context for its own origin, replacing any previous one
+    /// for that same origin (a reconnect).
     pub fn set(&self, ctx: PairContext) {
-        *self.0.lock().expect("PairState mutex poisoned") = Some(ctx);
+        self.0
+            .lock()
+            .expect("PairState mutex poisoned")
+            .insert(ctx.origin.clone(), ctx);
     }
 
-    pub fn clear(&self) {
-        *self.0.lock().expect("PairState mutex poisoned") = None;
+    /// Forget one panel's context — and with it the password it held.
+    pub fn clear_origin(&self, origin: &str) {
+        self.0
+            .lock()
+            .expect("PairState mutex poisoned")
+            .remove(origin);
     }
 
-    /// The active context if `url` belongs to its origin.
+    /// The context for the panel this page load came from.
     pub fn for_url(&self, url: &tauri::Url) -> Option<PairContext> {
         self.0
             .lock()
             .expect("PairState mutex poisoned")
-            .as_ref()
-            .filter(|c| same_origin(url, &c.origin))
+            .values()
+            .find(|c| same_origin(url, &c.origin))
             .cloned()
     }
 }
@@ -710,6 +722,48 @@ mod tests {
         assert!(voltd < zeroclaw, "{shown:?}");
     }
 
+    fn ctx_for(origin: &str) -> PairContext {
+        PairContext {
+            origin: origin.to_string(),
+            profile: profile(),
+            password: None,
+            embedded: false,
+            lang: Lang::Ru,
+            admin_token: None,
+        }
+    }
+
+    #[test]
+    fn two_contexts_coexist_and_each_answers_its_own_origin() {
+        // Two connected windows mean two panels, each with its own pairing
+        // context; the second connect must not overwrite the first.
+        let state = PairState::default();
+        state.set(ctx_for("http://127.0.0.1:41001"));
+        state.set(ctx_for("http://127.0.0.1:41002"));
+        let first = tauri::Url::parse("http://127.0.0.1:41001/?volt_pair=1").unwrap();
+        let second = tauri::Url::parse("http://127.0.0.1:41002/").unwrap();
+        assert_eq!(
+            state.for_url(&first).map(|c| c.origin),
+            Some("http://127.0.0.1:41001".to_string())
+        );
+        assert_eq!(
+            state.for_url(&second).map(|c| c.origin),
+            Some("http://127.0.0.1:41002".to_string())
+        );
+    }
+
+    #[test]
+    fn clear_origin_leaves_the_other_context() {
+        let state = PairState::default();
+        state.set(ctx_for("http://127.0.0.1:41001"));
+        state.set(ctx_for("http://127.0.0.1:41002"));
+        state.clear_origin("http://127.0.0.1:41001");
+        let gone = tauri::Url::parse("http://127.0.0.1:41001/").unwrap();
+        let kept = tauri::Url::parse("http://127.0.0.1:41002/").unwrap();
+        assert!(state.for_url(&gone).is_none());
+        assert!(state.for_url(&kept).is_some());
+    }
+
     #[test]
     fn origin_comparison_ignores_the_path() {
         let a = tauri::Url::parse("http://127.0.0.1:52610/sessions?x=1").unwrap();
@@ -742,7 +796,7 @@ mod tests {
         assert_eq!(ctx.profile.id, "a");
         // Not consumed by a lookup: a later page load still sees it.
         assert!(state.for_url(&mine).is_some());
-        state.clear();
+        state.clear_origin(&ctx.origin);
         assert!(state.for_url(&mine).is_none());
     }
 

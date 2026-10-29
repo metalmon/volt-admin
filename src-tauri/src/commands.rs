@@ -500,8 +500,12 @@ pub async fn disconnect<R: Runtime>(
             dropped.len()
         ),
     );
-    // Forget the connection's pairing context (and with it the password).
-    pair_state.clear();
+    // Forget the pairing context — and with it the password — of every panel
+    // whose connection actually went away. A panel another window (or a
+    // watcher) still holds keeps its context.
+    for d in &dropped {
+        pair_state.clear_origin(&d.origin);
+    }
 
     // Back to the launcher identity in the title bar.
     let _ = window.set_title("Вольт Админ");

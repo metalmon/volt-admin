@@ -49,6 +49,15 @@ pub struct Held {
     pub embedded: bool,
 }
 
+/// A connection that was released and is now gone, and the panel origin it
+/// served — the caller forgets that panel's pairing context, but only when
+/// the connection really went away and not while another holder keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dropped {
+    pub profile_id: String,
+    pub origin: String,
+}
+
 /// One live connection to a gateway.
 pub struct Connection {
     /// `None` for `Local` profiles, which reach the panel on loopback.
@@ -59,6 +68,9 @@ pub struct Connection {
     pub tunnel: Option<Tunnel>,
     /// Where the panel answers on this machine.
     pub local_port: u16,
+    /// `http://127.0.0.1:<local_port>` — what the webview calls this panel,
+    /// and what `crate::pair` keys its contexts by.
+    origin: String,
     /// Carried so a REUSED connection still reports how it is served:
     /// pairing and the admin-token read branch on it.
     embedded: bool,
@@ -133,6 +145,7 @@ impl Registry {
             Connection {
                 tunnel,
                 local_port,
+                origin: format!("http://127.0.0.1:{local_port}"),
                 embedded,
                 fingerprint: fingerprint.to_string(),
                 holders,
@@ -163,14 +176,14 @@ impl Registry {
 
     /// Release one holder's claim everywhere — how a window that is closing
     /// lets go of whatever it was showing.
-    pub async fn release_all_for(&self, holder: &Holder) -> Vec<String> {
+    pub async fn release_all_for(&self, holder: &Holder) -> Vec<Dropped> {
         self.release_matching(move |h| h == holder, |_| true).await
     }
 
     /// [`Self::release_all`], except for `keep` — how a window moving from
     /// one profile to another lets go of the first without touching the one
     /// it just arrived at.
-    pub async fn release_others(&self, holder: Holder, keep: &str) -> Vec<String> {
+    pub async fn release_others(&self, holder: Holder, keep: &str) -> Vec<Dropped> {
         let keep = keep.to_string();
         self.release_matching(move |h| *h == holder, move |id| id != keep)
             .await
@@ -182,7 +195,7 @@ impl Registry {
         &self,
         holder_matches: impl Fn(&Holder) -> bool,
         which: impl Fn(&str) -> bool,
-    ) -> Vec<String> {
+    ) -> Vec<Dropped> {
         let mut map = self.0.lock().await;
         let mut dropped = Vec::new();
         map.retain(|id, conn| {
@@ -191,7 +204,10 @@ impl Registry {
             }
             conn.holders.retain(|h| !holder_matches(h));
             if conn.holders.is_empty() {
-                dropped.push(id.clone());
+                dropped.push(Dropped {
+                    profile_id: id.clone(),
+                    origin: conn.origin.clone(),
+                });
                 return false;
             }
             true
@@ -215,6 +231,7 @@ impl Registry {
             Connection {
                 tunnel: None,
                 local_port,
+                origin: format!("http://127.0.0.1:{local_port}"),
                 embedded: false,
                 fingerprint: String::new(),
                 holders: HashSet::from([holder]),
@@ -302,7 +319,12 @@ mod tests {
     #[tokio::test]
     async fn releasing_a_window_reports_every_id_it_dropped() {
         let r = registry_with(&["a", "b"]).await;
-        let mut dropped = r.release_all_for(&window("w1")).await;
+        let mut dropped: Vec<String> = r
+            .release_all_for(&window("w1"))
+            .await
+            .into_iter()
+            .map(|d| d.profile_id)
+            .collect();
         dropped.sort();
         assert_eq!(dropped, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(r.len().await, 0);
@@ -312,7 +334,13 @@ mod tests {
     async fn release_others_keeps_the_named_profile() {
         let r = registry_with(&["a", "b"]).await;
         let dropped = r.release_others(window("w1"), "b").await;
-        assert_eq!(dropped, vec!["a".to_string()]);
+        assert_eq!(
+            dropped
+                .iter()
+                .map(|d| d.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
         assert_eq!(r.local_port("b").await, Some(9001));
     }
 
@@ -341,7 +369,13 @@ mod tests {
         r.publish("b", None, 9001, false, "fp", window("w1")).await;
         r.hold("b", "fp", window("w2")).await;
         let dropped = r.release_others(window("w1"), "b").await;
-        assert_eq!(dropped, vec!["a".to_string()]);
+        assert_eq!(
+            dropped
+                .iter()
+                .map(|d| d.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
         assert_eq!(r.local_port("b").await, Some(9001), "w2 still holds b");
     }
 
@@ -352,7 +386,15 @@ mod tests {
         r.hold("a", "fp", Holder::Monitor).await;
         r.publish("b", None, 9001, false, "fp", window("w1")).await;
         let dropped = r.release_all_for(&window("w1")).await;
-        assert_eq!(dropped, vec!["b".to_string()], "only b had no other holder");
+        assert_eq!(
+            dropped
+                .iter()
+                .map(|d| d.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"],
+            "only b had no other holder"
+        );
+        assert_eq!(dropped[0].origin, "http://127.0.0.1:9001");
         assert_eq!(r.local_port("a").await, Some(9000), "the monitor keeps a");
     }
 
