@@ -370,6 +370,17 @@ export default function Connect() {
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-10">
       <header className="relative text-center">
+        {/* A second window is another connection side by side; the tray
+            offers the same thing when no window is in the way. */}
+        <div className="absolute left-0 top-0">
+          <Button
+            variant="outline"
+            onClick={() => void invoke('new_window').catch((e) => setError(String(e)))}
+            className={importButtonClass}
+          >
+            {t('btn.newWindow')}
+          </Button>
+        </div>
         <div className="absolute right-0 top-0">
           <LanguageToggle />
         </div>

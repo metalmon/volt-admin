@@ -18,21 +18,23 @@ use crate::windows;
 pub const TRAY_ID: &str = "main";
 
 const OPEN_ID: &str = "open";
+const NEW_ID: &str = "new";
 const QUIT_ID: &str = "quit";
 
-/// The menu's two labels, in `lang`.
-fn labels(lang: Lang) -> (&'static str, &'static str) {
+/// The menu's labels, in `lang`: show a window, open another one, quit.
+fn labels(lang: Lang) -> (&'static str, &'static str, &'static str) {
     match lang {
-        Lang::Ru => ("Открыть", "Выйти"),
-        Lang::En => ("Open", "Quit"),
+        Lang::Ru => ("Открыть", "Новое окно", "Выйти"),
+        Lang::En => ("Open", "New window", "Quit"),
     }
 }
 
 fn build_menu<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> tauri::Result<Menu<R>> {
-    let (open, quit) = labels(lang);
+    let (open, new, quit) = labels(lang);
     let open = MenuItem::with_id(app, OPEN_ID, open, true, None::<&str>)?;
+    let new = MenuItem::with_id(app, NEW_ID, new, true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT_ID, quit, true, None::<&str>)?;
-    Menu::with_items(app, &[&open, &quit])
+    Menu::with_items(app, &[&open, &new, &quit])
 }
 
 /// Put the tray in place. "Quit" must be there, or an app that outlives its
@@ -49,6 +51,9 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> tauri::Result<()> 
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             OPEN_ID => windows::show_a_window(app),
+            NEW_ID => {
+                let _ = windows::open_window(app);
+            }
             QUIT_ID => app.exit(0),
             _ => {}
         })
@@ -84,7 +89,7 @@ mod tests {
 
     #[test]
     fn both_languages_have_their_own_labels() {
-        assert_eq!(labels(Lang::Ru), ("Открыть", "Выйти"));
-        assert_eq!(labels(Lang::En), ("Open", "Quit"));
+        assert_eq!(labels(Lang::Ru), ("Открыть", "Новое окно", "Выйти"));
+        assert_eq!(labels(Lang::En), ("Open", "New window", "Quit"));
     }
 }
