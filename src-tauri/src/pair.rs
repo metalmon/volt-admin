@@ -248,7 +248,15 @@ pub async fn redeem_code(origin: &str, code: &str) -> Result<String, String> {
         "device_name": DEVICE_NAME,
         "device_type": "desktop",
     });
-    let response = reqwest::Client::new()
+    // NO PROXY. The target is always loopback — the panel itself, or the
+    // near end of our tunnel — and a machine with HTTP_PROXY set and no
+    // exception for 127.0.0.1 would otherwise send a pairing code out
+    // through it.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let response = client
         .post(format!("{origin}/api/pair"))
         .json(&body)
         .timeout(Duration::from_secs(10))
