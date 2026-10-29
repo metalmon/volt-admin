@@ -1,6 +1,7 @@
 # Spec: watching the gateways, not the launcher
 
-**Status:** draft — the transport question is answered (see The source)
+**Status:** draft — the architecture is in
+`docs/superpowers/specs/2026-10-29-gateway-monitoring-design.md`
 **Owner:** launcher (new `monitor` module, tray, notifications)
 
 ## Problem
@@ -83,10 +84,10 @@ from "the connection the window is showing":
 This is the bulk of the work, and it is what makes the feature a product
 change rather than a screen.
 
-An exception worth measuring first: `/api/logs` is plain HTTP on the panel
-port, so a profile whose gateway is reachable directly on a trusted network
-needs no tunnel at all to be watched — and a `Local` profile never needed
-one. Tunnels are only for the profiles that genuinely sit behind SSH.
+No exception in the pilot: the kit binds the panel to `127.0.0.1`
+(`[gateway] host = "127.0.0.1"`, "reachable only from the host itself or
+through the Volt Admin SSH tunnel"), so a watched remote gateway needs its
+tunnel up. Only a `Local` profile is free of one.
 
 ## Behavior
 
