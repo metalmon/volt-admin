@@ -95,6 +95,16 @@ fn as_ui_error(reason: String) -> String {
     }
 }
 
+/// Open another window on the Connect screen. The app is one process with
+/// several windows now (see `crate::windows`), so this is how a second
+/// connection is started without launching the exe again.
+#[command]
+pub fn new_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    crate::windows::open_window(&app)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Write a saved profile to a JSON file in the user's download directory and
 /// return the full path. No save dialog: that needs another plugin, and the
 /// point here is to hand someone a file — the UI reveals it in the file
@@ -395,7 +405,9 @@ pub async fn connect<R: Runtime>(
             Some(tun) => tun.local_port,
             None => profile.panel_port,
         };
-        registry
+        // Replacing an entry means the profile was edited since it was
+        // opened: that panel is gone, so its context goes too.
+        if let Some(replaced) = registry
             .publish(
                 &profile.id,
                 tunnel_opt,
@@ -404,7 +416,17 @@ pub async fn connect<R: Runtime>(
                 &fingerprint,
                 Holder::Window(window_label.clone()),
             )
-            .await;
+            .await
+        {
+            app.state::<PairState>().clear_origin(&replaced.origin);
+            logx::log(
+                "connect",
+                &format!(
+                    "replaced an edited profile's connection on {}",
+                    replaced.origin
+                ),
+            );
+        }
     }
     let dropped = registry
         .release_others(Holder::Window(window_label.clone()), &profile.id)

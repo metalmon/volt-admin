@@ -121,10 +121,17 @@ impl Registry {
         self.1.lock().await
     }
 
-    /// Register a connection that is ready to use, held by `holder`. A
-    /// previous entry for this profile is replaced — but its OTHER holders
-    /// are carried over, or a window connecting to a profile a watcher is
-    /// already holding would drop the watcher's claim.
+    /// Register a connection that is ready to use, held by `holder`, and
+    /// return whatever it replaced.
+    ///
+    /// Replacing only happens when [`Self::hold`] refused the old entry —
+    /// its fingerprint no longer matches, so it leads somewhere else. Its
+    /// holders are NOT carried over: they are pointing at a port that is
+    /// gone, and keeping their claims would hold this new connection open
+    /// on behalf of a webview showing a dead panel. The caller is handed the
+    /// old connection so it can forget that panel's pairing context —
+    /// leaving it would keep a password and an admin token in memory, and a
+    /// later tunnel landing on the freed port would be given them.
     pub async fn publish(
         &self,
         profile_id: &str,
@@ -133,13 +140,13 @@ impl Registry {
         embedded: bool,
         fingerprint: &str,
         holder: Holder,
-    ) {
+    ) -> Option<Dropped> {
         let mut map = self.0.lock().await;
-        let mut holders = map
-            .get(profile_id)
-            .map(|c| c.holders.clone())
-            .unwrap_or_default();
-        holders.insert(holder);
+        let holders = HashSet::from([holder]);
+        let replaced = map.get(profile_id).map(|old| Dropped {
+            profile_id: profile_id.to_string(),
+            origin: old.origin.clone(),
+        });
         map.insert(
             profile_id.to_string(),
             Connection {
@@ -153,6 +160,7 @@ impl Registry {
                 probe: None,
             },
         );
+        replaced
     }
 
     /// Drop `holder`'s claim. Returns whether that was the last one, in
@@ -410,17 +418,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_keeps_a_holder_that_is_already_there() {
-        // A watcher holding a connection must survive the window connecting
-        // to the same profile, or phase 3 kills its own tunnel.
+    async fn publish_over_an_entry_reports_what_it_replaced() {
+        // Replacing only ever happens when the profile was edited, so the
+        // old connection is to somewhere else: its panel's context must be
+        // forgotten, or that panel's password and admin token outlive it —
+        // and a later tunnel landing on the freed port would be handed the
+        // old host's token.
+        let r = registry_with(&["a"]).await;
+        let replaced = r
+            .publish("a", None, 9100, false, "new-fp", window("w1"))
+            .await
+            .expect("the old connection came back");
+        assert_eq!(replaced.profile_id, "a");
+        assert_eq!(replaced.origin, "http://127.0.0.1:9000", "the OLD origin");
+        assert_eq!(r.local_port("a").await, Some(9100));
+    }
+
+    #[tokio::test]
+    async fn publish_does_not_carry_stale_holders_onto_a_new_connection() {
+        // A holder of the replaced connection is pointing at a port that is
+        // gone; keeping its claim would hold the NEW connection open on its
+        // behalf while its webview shows a dead panel.
         let r = registry_with(&["a"]).await;
         r.hold("a", "fp", Holder::Monitor).await;
-        r.publish("a", None, 9100, false, "fp", window("w1")).await;
+        r.publish("a", None, 9100, false, "new-fp", window("w1"))
+            .await;
         assert!(
-            !r.release("a", window("w1")).await,
-            "the monitor hold must still be there"
+            r.release("a", window("w1")).await,
+            "the window was the only holder of the new connection"
         );
-        assert_eq!(r.len().await, 1);
+        assert_eq!(r.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn publishing_a_first_connection_replaces_nothing() {
+        let r = Registry::default();
+        assert!(r
+            .publish("a", None, 9000, false, "fp", window("w1"))
+            .await
+            .is_none());
     }
 
     #[tokio::test]

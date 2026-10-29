@@ -6,6 +6,19 @@
 //! Launching the app again does not start a second process — the
 //! single-instance plugin hands the launch to this one, which opens another
 //! window here.
+//!
+//! Per-platform caveats of the tray that holds the process:
+//!
+//! * **Linux** — Tauri emits no tray CLICK events there, so the icon is
+//!   reached through its menu only. On a desktop with no StatusNotifier
+//!   host the icon does not appear at all: the process then has no UI, and
+//!   the way back is to launch the app again — the single-instance plugin
+//!   hands that launch here and a window opens.
+//! * **macOS** — closing the last window leaves the app in the Dock;
+//!   `RunEvent::Reopen` brings a window back when its icon is clicked.
+//!   Cmd+Q goes through the standard menu and ends the process without a
+//!   `RunEvent`, so the ssh children are reaped by their own guard rather
+//!   than by anything here (`crate::tunnel::child_guard`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

@@ -23,9 +23,10 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Multi-copy model: no single-instance lock — launching the app again
-    // opens another independent copy (another connection). See
-    // _local/plan-volt-admin-multiwindow.md.
+    // One process, several windows: a second launch is handed to this
+    // instance by the single-instance plugin below, and a window is one view
+    // on one connection rather than the app itself. See
+    // `docs/superpowers/specs/2026-10-29-gateway-monitoring-design.md` §2.
     let builder = tauri::Builder::default();
 
     builder
@@ -135,6 +136,7 @@ pub fn run() {
             commands::parse_profile_doc,
             commands::export_profile_file,
             commands::collect_diagnostics,
+            commands::new_window,
             commands::delete_profile,
             commands::connect,
             commands::disconnect
@@ -142,8 +144,7 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             {
-                // Multi-copy model: no tray. Closing the window quits this
-                // copy. Its ssh children die with it, but NOT through Rust's
+                // Closing a window no longer quits the app. Its ssh children die with it, but NOT through Rust's
                 // Drop — `Builder::run` ends the process with
                 // `std::process::exit`, which runs no destructor. What reaps
                 // them is the OS-level guard each child is given at spawn: a
