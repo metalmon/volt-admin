@@ -95,6 +95,16 @@ fn as_ui_error(reason: String) -> String {
     }
 }
 
+/// Remember the interface language the UI just switched to, and move the
+/// tray to it — the tray is built before any window exists, so it cannot
+/// ask the webview (see `crate::settings`).
+#[command]
+pub fn set_language<R: Runtime>(app: AppHandle<R>, lang: String) -> Result<(), String> {
+    let lang = Lang::from_code(Some(&lang));
+    crate::settings::set_language(&app, lang)?;
+    crate::tray::relabel(&app, lang).map_err(|e| e.to_string())
+}
+
 /// Open another window on the Connect screen. The app is one process with
 /// several windows now (see `crate::windows`), so this is how a second
 /// connection is started without launching the exe again.

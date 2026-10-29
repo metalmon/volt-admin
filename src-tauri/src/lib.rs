@@ -4,6 +4,8 @@ mod logx;
 mod pair;
 mod profile_doc;
 mod registry;
+mod settings;
+mod tray;
 mod tunnel;
 mod tunnel_embedded;
 mod windows;
@@ -137,6 +139,7 @@ pub fn run() {
             commands::export_profile_file,
             commands::collect_diagnostics,
             commands::new_window,
+            commands::set_language,
             commands::delete_profile,
             commands::connect,
             commands::disconnect
@@ -174,35 +177,10 @@ pub fn run() {
 
                 // The tray is what keeps the process alive once the last
                 // window is closed — which is the point: a connection, and
-                // later a watcher, outlives the window that opened it. It
-                // must offer a way out, or the app cannot be quit from the
-                // UI at all.
-                let open =
-                    tauri::menu::MenuItem::with_id(app, "open", "Открыть", true, None::<&str>)?;
-                let quit =
-                    tauri::menu::MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
-                let menu = tauri::menu::Menu::with_items(app, &[&open, &quit])?;
-                tauri::tray::TrayIconBuilder::with_id("main")
-                    .icon(app.default_window_icon().cloned().ok_or("no app icon")?)
-                    .tooltip(windows::LAUNCHER_TITLE)
-                    .menu(&menu)
-                    .show_menu_on_left_click(false)
-                    .on_menu_event(|app, event| match event.id().as_ref() {
-                        "open" => windows::show_a_window(app),
-                        "quit" => app.exit(0),
-                        _ => {}
-                    })
-                    .on_tray_icon_event(|tray, event| {
-                        if let tauri::tray::TrayIconEvent::Click {
-                            button: tauri::tray::MouseButton::Left,
-                            button_state: tauri::tray::MouseButtonState::Up,
-                            ..
-                        } = event
-                        {
-                            windows::show_a_window(tray.app_handle());
-                        }
-                    })
-                    .build(app)?;
+                // later a watcher, outlives the window that opened it. Its
+                // language comes from the store, because no window exists
+                // yet to ask (see `crate::settings`).
+                tray::install(app.handle(), settings::language(app.handle()))?;
             }
             Ok(())
         })

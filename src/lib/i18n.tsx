@@ -12,6 +12,7 @@
  * locale is auto-detected; otherwise Russian (the product is RU-first). The
  * manual choice is persisted in `localStorage` so it survives restarts.
  */
+import { invoke } from '@tauri-apps/api/core'
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 
 export type Lang = 'ru' | 'en'
@@ -204,6 +205,11 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     } catch {
       /* persistence best-effort */
     }
+    // The Rust side keeps its own copy: the tray is built before any window
+    // exists, so it cannot read this one (see `src-tauri/src/settings.rs`).
+    void invoke('set_language', { lang: l }).catch(() => {
+      /* the tray keeps the previous language; nothing else depends on it */
+    })
   }
 
   const t: Translate = (key, params) => {

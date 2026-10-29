@@ -234,6 +234,14 @@ impl Lang {
         }
     }
 
+    /// The code this language is stored and sent as.
+    pub fn code(self) -> &'static str {
+        match self {
+            Lang::Ru => "ru",
+            Lang::En => "en",
+        }
+    }
+
     fn pick<'a>(self, ru: &'a str, en: &'a str) -> &'a str {
         match self {
             Lang::Ru => ru,
@@ -1137,6 +1145,13 @@ mod tests {
         let l = requested_local_listener(&p).unwrap();
         assert_eq!(l.local_addr().unwrap().port(), 43210);
         drop(l);
+    }
+
+    #[test]
+    fn a_language_survives_a_round_trip_through_its_code() {
+        for lang in [Lang::Ru, Lang::En] {
+            assert_eq!(Lang::from_code(Some(lang.code())), lang);
+        }
     }
 
     #[test]
