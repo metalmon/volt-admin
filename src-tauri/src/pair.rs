@@ -123,11 +123,67 @@ pub fn paircode_command(p: &Profile) -> String {
                 .replace("{principal}", &principal(p));
         }
     }
+    // `Remote` runs on the server, where the kit puts voltd on PATH. `Local`
+    // runs here, where a native install does NOT: the binary sits in
+    // `<config-dir>/bin` and the daemon is started by its full path, so a
+    // bare `voltd` only produces "is not recognized as an internal or
+    // external command".
+    let binary = match p.mode {
+        ConnMode::Local => local_voltd_binary().unwrap_or_else(|| "voltd".into()),
+        ConnMode::Remote => "voltd".into(),
+    };
     format!(
-        "voltd gateway get-paircode --new --port {} --principal {}",
+        "{} gateway get-paircode --new --port {} --principal {}",
+        quote_if_needed(&binary),
         p.panel_port,
         principal(p)
     )
+}
+
+/// Both shells here (`cmd /C`, `sh -c`) take one string, so a path with a
+/// space in it — `C:\Users\Ivan Petrov\.voltd\bin\voltd.exe` — needs quoting.
+fn quote_if_needed(s: &str) -> String {
+    if s.contains(' ') && !s.starts_with('"') {
+        format!("\"{s}\"")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Executable names, newest first — same compatibility window as
+/// [`CONFIG_DIRS`].
+const BINARY_NAMES: &[&str] = if cfg!(windows) {
+    &["voltd.exe", "zeroclaw.exe"]
+} else {
+    &["voltd", "zeroclaw"]
+};
+
+/// The voltd binary on THIS machine: whatever `PATH` offers first, else the
+/// `bin` directory of a config directory that exists.
+fn local_voltd_binary() -> Option<String> {
+    if let Some(found) = BINARY_NAMES.iter().find_map(|name| which_on_path(name)) {
+        return Some(found);
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    local_config_dirs(|var| std::env::var_os(var), home)
+        .iter()
+        .flat_map(|dir| {
+            BINARY_NAMES
+                .iter()
+                .map(move |name| dir.join("bin").join(name))
+        })
+        .find(|path| path.is_file())
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// First `name` on `PATH`, as the OS would resolve it.
+fn which_on_path(name: &str) -> Option<String> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .map(|found| found.to_string_lossy().into_owned())
 }
 
 /// Mint a pairing code on the gateway machine. `embedded` = the tunnel runs
@@ -318,7 +374,11 @@ async fn run_local(command: &str) -> Result<String, String> {
     #[cfg(windows)]
     let mut cmd = {
         let mut c = Command::new("cmd");
-        c.args(["/C", command]);
+        // `chcp 65001` first, or cmd writes its own messages in the console's
+        // OEM codepage (866 on a Russian Windows) and `from_utf8_lossy` turns
+        // «не является внутренней или внешней командой» into mojibake — in
+        // the log AND in the error shown to the user.
+        c.args(["/C", &format!("chcp 65001>nul && {command}")]);
         c.creation_flags(CREATE_NO_WINDOW);
         c
     };
@@ -571,6 +631,32 @@ mod tests {
         );
         // An unset variable contributes nothing rather than an empty path.
         assert_eq!(local.len(), 4, "{shown:?}");
+    }
+
+    #[test]
+    fn paircode_command_quotes_a_path_with_spaces() {
+        assert_eq!(
+            quote_if_needed(r"C:\Users\Ivan Petrov\.voltd\bin\voltd.exe"),
+            r#""C:\Users\Ivan Petrov\.voltd\bin\voltd.exe""#
+        );
+        assert_eq!(quote_if_needed("voltd"), "voltd");
+        // Already quoted stays as it is rather than gaining a second pair.
+        assert_eq!(quote_if_needed("\"a b\""), "\"a b\"");
+    }
+
+    #[test]
+    fn remote_paircode_command_stays_a_bare_voltd() {
+        // It runs on the server, where the kit puts voltd on PATH — this
+        // machine's layout says nothing about that one.
+        let p = Profile {
+            mode: ConnMode::Remote,
+            ..profile()
+        };
+        let cmd = paircode_command(&p);
+        assert!(
+            cmd.starts_with("voltd gateway get-paircode --new --port "),
+            "{cmd}"
+        );
     }
 
     #[test]
