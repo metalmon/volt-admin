@@ -41,6 +41,12 @@ its items answer "Emergency stop is disabled. Enable [security.estop].enabled
 takes nothing away, so it does not confirm; it writes one key and the gateway
 picks it up when it next reads its config.
 
+The menu asks `config get security.estop.enabled` when it opens and greys
+out what cannot work: the three stop items while it is off, the item that
+turns it on while it is on. Only on an ANSWER — a gateway that is down or
+unreachable leaves them clickable, the way they were before the question
+was asked.
+
 **`estop --level kill-all`** stops the deployment. Same rule for its
 confirmation. `domain-block` and `tool-freeze` need domain and tool
 arguments and belong in the panel, not in a menu.
@@ -104,7 +110,13 @@ with nothing to fill it.
 - A failed action shows what the command printed, starting with the line
   that says why — not its tail.
 - Turning the emergency stop on makes its state item answer with a state
-  instead of with "disabled".
+  instead of with "disabled", and the three stop items are greyed out until
+  it is on.
+- A restart refused with "config lifecycle is already owned" says, under
+  voltd's own text, that a daemon or service is holding the gateway and
+  names what to do instead. `voltd gateway restart` can only restart a
+  gateway the CLI itself started; anything the launcher connects to in a
+  real deployment is held by the daemon.
 - Nothing in the log contains a pairing code.
 - A connect after any rotate — ours or one typed on the gateway — lands on
   the panel signed in, not on its pairing form: the session this app hands
