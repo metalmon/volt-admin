@@ -113,31 +113,29 @@ pub fn run() {
         // hold would keep an ssh child alive until the app quits. Releasing
         // here is what makes a connection outlive only the windows that
         // still want it.
-        .on_window_event(|window, event| {
-            if !matches!(event, tauri::WindowEvent::Destroyed) {
-                return;
-            }
-            let holder = registry::Holder::Window(window.label().to_string());
-            let app = window.app_handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let dropped = app
-                    .state::<registry::Registry>()
-                    .release_all_for(&holder)
-                    .await;
-                // Same rule as `disconnect`: a panel that is gone must not
-                // leave its password and admin token behind in memory.
-                let pair_state = app.state::<pair::PairState>();
-                for d in &dropped {
-                    pair_state.clear_origin(&d.origin);
+        .on_window_event(|window, event| match event {
+            // The LAST window hides instead of closing: rebuilding it from
+            // the tray means booting a whole webview, slowly and somewhere
+            // else on screen. It still counts as closed — see
+            // `windows::hide_as_closed`.
+            tauri::WindowEvent::CloseRequested { api, .. }
+                if window.app_handle().webview_windows().len() == 1 =>
+            {
+                api.prevent_close();
+                if let Some(w) = window.app_handle().get_webview_window(window.label()) {
+                    windows::hide_as_closed(&w);
                 }
-                logx::log(
-                    "window",
-                    &format!(
-                        "{holder:?} destroyed, released {} connection(s)",
-                        dropped.len()
-                    ),
-                );
-            });
+            }
+            // Any other window really closes, and never calls `disconnect`
+            // on its way out — so its hold is released here.
+            tauri::WindowEvent::Destroyed => {
+                let app = window.app_handle().clone();
+                let label = window.label().to_string();
+                tauri::async_runtime::spawn(async move {
+                    windows::release_window(&app, &label).await;
+                });
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,

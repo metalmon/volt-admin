@@ -61,6 +61,50 @@ pub fn show_a_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Let go of whatever this window was showing: its connection (unless
+/// another window or a watcher still holds it) and that panel's pairing
+/// context, which carries an SSH password and the gateway admin token.
+///
+/// Called when a window is destroyed AND when the last one is hidden
+/// instead — closing means the same thing either way.
+pub async fn release_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    let holder = crate::registry::Holder::Window(label.to_string());
+    let dropped = app
+        .state::<crate::registry::Registry>()
+        .release_all_for(&holder)
+        .await;
+    let pair_state = app.state::<crate::pair::PairState>();
+    for d in &dropped {
+        pair_state.clear_origin(&d.origin);
+    }
+    crate::logx::log(
+        "window",
+        &format!("{label} closed, released {} connection(s)", dropped.len()),
+    );
+}
+
+/// Hide the last window rather than destroying it.
+///
+/// Destroying it meant the tray had to build a new one — a fresh webview
+/// booting the whole frontend, which is both slow and somewhere else on
+/// screen. Hidden, it comes back instantly and in place.
+///
+/// It still COUNTS as closed: the connection is released and the webview
+/// goes back to the Connect screen, or showing it again would present a
+/// panel whose port is long gone.
+pub fn hide_as_closed<R: Runtime>(window: &WebviewWindow<R>) {
+    let app = window.app_handle().clone();
+    let label = window.label().to_string();
+    let _ = window.set_title(LAUNCHER_TITLE);
+    if let Some(url) = app.state::<crate::commands::StartUrl>().get() {
+        let _ = window.navigate(url);
+    }
+    let _ = window.hide();
+    tauri::async_runtime::spawn(async move {
+        release_window(&app, &label).await;
+    });
+}
+
 /// Cap a window to the monitor's work area (the screen minus the taskbar).
 /// The configured size is picked so the profile form fits without a
 /// scrollbar on a normal screen; this is the small-screen fallback. Runs
