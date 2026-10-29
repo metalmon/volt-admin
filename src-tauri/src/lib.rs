@@ -6,6 +6,7 @@ mod profile_doc;
 mod registry;
 mod tunnel;
 mod tunnel_embedded;
+mod windows;
 
 // NOTE (was M1 TODO): the panel is no longer loaded in an `<iframe>` — the
 // daemon serves `Content-Security-Policy: frame-ancestors 'none'`
@@ -28,6 +29,13 @@ pub fn run() {
     let builder = tauri::Builder::default();
 
     builder
+        // FIRST, as the plugin requires: a second launch is handed to this
+        // process, which opens another window instead of starting a second
+        // copy of the app.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            logx::log("app", "second launch — opening a window");
+            let _ = windows::open_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         // Remember the window's size and position across runs, so a user who
@@ -106,6 +114,12 @@ pub fn run() {
                     .state::<registry::Registry>()
                     .release_all_for(&holder)
                     .await;
+                // Same rule as `disconnect`: a panel that is gone must not
+                // leave its password and admin token behind in memory.
+                let pair_state = app.state::<pair::PairState>();
+                for d in &dropped {
+                    pair_state.clear_origin(&d.origin);
+                }
                 logx::log(
                     "window",
                     &format!(
@@ -152,45 +166,57 @@ pub fn run() {
 
                 // Launcher identity in the title bar (RU brand «Вольт Админ»),
                 // overriding the conf default so it matches the connected title.
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.set_title("Вольт Админ");
-                    fit_to_screen(&window);
+                for window in app.webview_windows().values() {
+                    let _ = window.set_title(windows::LAUNCHER_TITLE);
+                    windows::fit_to_screen(window);
                 }
+
+                // The tray is what keeps the process alive once the last
+                // window is closed — which is the point: a connection, and
+                // later a watcher, outlives the window that opened it. It
+                // must offer a way out, or the app cannot be quit from the
+                // UI at all.
+                let open =
+                    tauri::menu::MenuItem::with_id(app, "open", "Открыть", true, None::<&str>)?;
+                let quit =
+                    tauri::menu::MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
+                let menu = tauri::menu::Menu::with_items(app, &[&open, &quit])?;
+                tauri::tray::TrayIconBuilder::with_id("main")
+                    .icon(app.default_window_icon().cloned().ok_or("no app icon")?)
+                    .tooltip(windows::LAUNCHER_TITLE)
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "open" => windows::show_a_window(app),
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let tauri::tray::TrayIconEvent::Click {
+                            button: tauri::tray::MouseButton::Left,
+                            button_state: tauri::tray::MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            windows::show_a_window(tray.app_handle());
+                        }
+                    })
+                    .build(app)?;
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
-}
-
-/// Cap the startup window to the monitor's work area (the screen minus the
-/// taskbar), re-centering it when it had to shrink. The conf size is picked
-/// so the profile form fits without a scrollbar on a normal screen; this is
-/// the small-screen fallback. Runs once at startup only — nothing resizes the
-/// window while the app is in use.
-#[cfg(desktop)]
-fn fit_to_screen<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
-    let Ok(Some(monitor)) = window.current_monitor() else {
-        return;
-    };
-    let (Ok(inner), Ok(outer)) = (window.inner_size(), window.outer_size()) else {
-        return;
-    };
-    // The decorations are part of the work area budget but not of `set_size`,
-    // which takes the INNER size.
-    let area = monitor.work_area().size;
-    let max_w = area
-        .width
-        .saturating_sub(outer.width.saturating_sub(inner.width));
-    let max_h = area
-        .height
-        .saturating_sub(outer.height.saturating_sub(inner.height));
-    if inner.width <= max_w && inner.height <= max_h {
-        return;
-    }
-    let _ = window.set_size(tauri::PhysicalSize::new(
-        inner.width.min(max_w),
-        inner.height.min(max_h),
-    ));
-    let _ = window.center();
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Closing the last window must NOT quit: the tray holds the
+            // process, and a connection — later a watcher — outlives the
+            // window that opened it. An explicit exit (the tray's «Выйти»,
+            // which calls `exit(0)`) carries a code and is let through.
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                api.prevent_exit();
+            }
+        });
 }

@@ -408,13 +408,19 @@ pub async fn connect<R: Runtime>(
     }
     let dropped = registry
         .release_others(Holder::Window(window_label.clone()), &profile.id)
-        .await
-        .len();
+        .await;
+    // A context outliving its connection would keep that panel's password
+    // and admin token in memory with nothing to use them on.
+    let pair_state = app.state::<PairState>();
+    for d in &dropped {
+        pair_state.clear_origin(&d.origin);
+    }
     logx::log(
         "connect",
         &format!(
-            "connection {}, {dropped} previous released",
-            if reused { "reused" } else { "published" }
+            "connection {}, {} previous released",
+            if reused { "reused" } else { "published" },
+            dropped.len()
         ),
     );
 
