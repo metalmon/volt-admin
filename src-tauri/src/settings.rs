@@ -70,6 +70,42 @@ pub fn remember_paired<R: Runtime>(
     store.save().map_err(|e| e.to_string())
 }
 
+/// The profiles remembered as paired with the gateway `fingerprint` names.
+/// Pure, so the rule is testable without a store.
+pub fn profiles_with_fingerprint(
+    paired: &serde_json::Map<String, serde_json::Value>,
+    fingerprint: &str,
+) -> Vec<String> {
+    paired
+        .iter()
+        .filter(|(_, v)| v.as_str() == Some(fingerprint))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// Forget every profile paired with this gateway, returning their ids.
+///
+/// A rotate revokes every token the gateway had issued, so every marker
+/// pointing at it is now a lie — and a lying marker sends the next connect
+/// past pairing and onto a pairing form with nothing to fill it.
+pub fn forget_paired_fingerprint<R: Runtime>(app: &AppHandle<R>, fingerprint: &str) -> Vec<String> {
+    let Ok(store) = app.store(STORE_PATH) else {
+        return Vec::new();
+    };
+    let Some(mut paired) = store.get(PAIRED_KEY).and_then(|v| v.as_object().cloned()) else {
+        return Vec::new();
+    };
+    let forgotten = profiles_with_fingerprint(&paired, fingerprint);
+    for id in &forgotten {
+        paired.remove(id);
+    }
+    if !forgotten.is_empty() {
+        store.set(PAIRED_KEY, serde_json::Value::Object(paired));
+        let _ = store.save();
+    }
+    forgotten
+}
+
 /// Forget a profile's pairing — it is deleted, or it now points elsewhere.
 pub fn forget_paired<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
     let Ok(store) = app.store(STORE_PATH) else {
@@ -94,6 +130,20 @@ pub fn set_language<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rotate_forgets_every_profile_pointing_at_that_gateway() {
+        let paired: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"a": "fp1", "b": "fp1", "c": "fp2"}))
+                .unwrap();
+        let mut forgotten = profiles_with_fingerprint(&paired, "fp1");
+        forgotten.sort();
+        assert_eq!(forgotten, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            profiles_with_fingerprint(&paired, "fp3"),
+            Vec::<String>::new()
+        );
+    }
 
     #[test]
     fn a_profile_that_never_paired_needs_to() {

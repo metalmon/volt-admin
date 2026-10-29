@@ -114,6 +114,24 @@ impl Registry {
         })
     }
 
+    /// Look at a connection without laying a claim on it.
+    ///
+    /// For callers that need a fact about it — whether it runs on the
+    /// built-in ssh client, say — and not the connection itself. Using
+    /// `hold` for that leaves a holder nobody releases, and the connection
+    /// then outlives every window that wanted it.
+    pub async fn peek(&self, profile_id: &str, fingerprint: &str) -> Option<Held> {
+        let map = self.0.lock().await;
+        let conn = map.get(profile_id)?;
+        if conn.fingerprint != fingerprint {
+            return None;
+        }
+        Some(Held {
+            local_port: conn.local_port,
+            embedded: conn.embedded,
+        })
+    }
+
     /// Hold this for the whole of a `connect`. Two connects that overlap
     /// would otherwise each publish and then release the other's connection,
     /// killing an ssh child the other has already handed to the webview.
@@ -404,6 +422,21 @@ mod tests {
         );
         assert_eq!(dropped[0].origin, "http://127.0.0.1:9001");
         assert_eq!(r.local_port("a").await, Some(9000), "the monitor keeps a");
+    }
+
+    #[tokio::test]
+    async fn peeking_lays_no_claim() {
+        // A gateway action asks whether the connection is embedded. If that
+        // question held the connection, the window that opened it could
+        // never close it again.
+        let r = registry_with(&["a"]).await;
+        assert!(r.peek("a", "fp").await.is_some());
+        assert!(r.peek("a", "other").await.is_none(), "wrong destination");
+        assert!(
+            r.release("a", window("w1")).await,
+            "the window was still the only holder"
+        );
+        assert_eq!(r.len().await, 0);
     }
 
     #[tokio::test]

@@ -117,6 +117,52 @@ pub fn set_language<R: Runtime>(app: AppHandle<R>, lang: String) -> Result<(), S
     crate::tray::relabel(&app, lang).map_err(|e| e.to_string())
 }
 
+/// Run one of the gateway actions on the profile's gateway and return what
+/// it printed (see `crate::actions`).
+///
+/// The OUTPUT comes back to the UI and goes nowhere else: a rotate prints a
+/// pairing code, which belongs on the administrator's screen and never in
+/// the log.
+#[command]
+pub async fn run_gateway_action<R: Runtime>(
+    app: AppHandle<R>,
+    profile: Profile,
+    action: crate::actions::GatewayAction,
+    confirmed: bool,
+    password: Option<String>,
+    lang: Option<String>,
+) -> Result<String, String> {
+    let lang = Lang::from_code(lang.as_deref());
+    // Only a live connection can be on the built-in client; an action on a
+    // profile that is not connected opens no tunnel and needs the system
+    // ssh of its own.
+    let embedded = app
+        .state::<Registry>()
+        .peek(&profile.id, &profile.connection_fingerprint())
+        .await
+        .is_some_and(|h: Held| h.embedded);
+    let output = crate::actions::run(
+        &profile,
+        action,
+        confirmed,
+        password.as_deref(),
+        embedded,
+        lang,
+    )
+    .await?;
+    if action == crate::actions::GatewayAction::RotatePairing {
+        // Every token this gateway had issued is gone, so every marker
+        // claiming it knows us is now wrong.
+        let forgotten =
+            crate::settings::forget_paired_fingerprint(&app, &profile.connection_fingerprint());
+        logx::log(
+            "action",
+            &format!("rotate: forgot {} pairing marker(s)", forgotten.len()),
+        );
+    }
+    Ok(output)
+}
+
 /// Open another window on the Connect screen. The app is one process with
 /// several windows now (see `crate::windows`), so this is how a second
 /// connection is started without launching the exe again.

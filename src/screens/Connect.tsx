@@ -12,6 +12,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
@@ -89,6 +90,20 @@ const importFieldLabelKey: Record<string, string> = {
   paircodeCommand: 'field.paircodeCommand',
 }
 
+/** The gateway actions the card's menu offers, in the order they appear.
+ *  `confirm` names the i18n key of the question asked first — the Rust side
+ *  refuses the action without that agreement, so this is the dialog, not
+ *  the rule (see `src-tauri/src/actions.rs`). */
+const gatewayActions = [
+  { action: 'rotatePairing', label: 'gw.rotate', confirm: 'gw.confirm.rotate', needs: null },
+  { action: 'emergencyEnable', label: 'gw.estopEnable', confirm: null, needs: 'off' },
+  { action: 'emergencyStop', label: 'gw.estop', confirm: 'gw.confirm.estop', needs: 'on' },
+  { action: 'emergencyStatus', label: 'gw.estopStatus', confirm: null, needs: 'on' },
+  { action: 'emergencyResume', label: 'gw.estopResume', confirm: null, needs: 'on' },
+] as const
+
+type GatewayActionId = (typeof gatewayActions)[number]['action']
+
 const importButtonClass = cn(
   'border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground',
 )
@@ -162,6 +177,20 @@ export default function Connect() {
   // is still on screen when the user goes to copy the diagnostics.
   const [lastError, setLastError] = useState<string | null>(null)
   const [diagCopied, setDiagCopied] = useState(false)
+  // A gateway action waiting for its answer, and the text its command
+  // printed — `--rotate` prints the code the administrator came for, so it
+  // stays until they close it.
+  const [pendingAction, setPendingAction] = useState<
+    { profile: Profile; action: GatewayActionId; label: string; confirm: string } | null
+  >(null)
+  const [actionBusy, setActionBusy] = useState(false)
+  const [actionResult, setActionResult] = useState<{ label: string; text: string } | null>(null)
+  /** Per profile: is the gateway's emergency stop enabled at all? Asked when
+   *  the menu opens, because until it is, all three of its items answer
+   *  "Emergency stop is disabled" and only the one that enables it does
+   *  anything. `undefined` = not asked yet or the ask failed — nothing is
+   *  greyed out on a guess. */
+  const [estopOn, setEstopOn] = useState<Record<string, boolean>>({})
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -280,6 +309,55 @@ export default function Connect() {
       setTimeout(() => setCopiedId((c) => (c === p.id ? null : c)), 3000)
     } catch {
       setError(t('err.export.clipboard'))
+    }
+  }
+
+  /** Ask the gateway whether its emergency stop is enabled, once per
+   *  profile per session. Quiet: a failure (gateway down, no ssh) leaves the
+   *  answer unknown and the items clickable, which is how they behaved
+   *  before this existed. */
+  const probeEstop = async (profile: Profile) => {
+    if (profile.id in estopOn) return
+    try {
+      const text = await invoke<string>('run_gateway_action', {
+        profile,
+        action: 'emergencyEnabled',
+        confirmed: false,
+        lang,
+      })
+      setEstopOn((m) => ({ ...m, [profile.id]: text.trim().toLowerCase().startsWith('true') }))
+    } catch {
+      /* unknown stays unknown */
+    }
+  }
+
+  /** Run one gateway action; `confirmed` is what Rust demands for the
+   *  destructive two. */
+  const runGatewayAction = async (
+    profile: Profile,
+    action: GatewayActionId,
+    label: string,
+    confirmed: boolean,
+  ) => {
+    setActionBusy(true)
+    try {
+      const text = await invoke<string>('run_gateway_action', {
+        profile,
+        action,
+        confirmed,
+        lang,
+      })
+      setError(null)
+      setActionResult({ label, text })
+      if (action === 'emergencyEnable') setEstopOn((m) => ({ ...m, [profile.id]: true }))
+    } catch (e) {
+      // NOT the error banner: that feeds the sticky "last error" the
+      // diagnostics paste carries, and a failing command's message is built
+      // from what it printed. Shown here, read, closed.
+      setActionResult({ label, text: t('gw.failed', { e: String(e) }) })
+    } finally {
+      setActionBusy(false)
+      setPendingAction(null)
     }
   }
 
@@ -431,7 +509,7 @@ export default function Connect() {
                       rest live behind the menu, so the card keeps room for
                       the profile's own line however long the host is. */}
                   <div className="flex shrink-0 items-center gap-2">
-                    <DropdownMenu>
+                    <DropdownMenu onOpenChange={(open) => open && void probeEstop(p)}>
                       <DropdownMenuTrigger asChild>
                         <Button
                           variant="outline"
@@ -459,6 +537,37 @@ export default function Connect() {
                         <DropdownMenuItem onSelect={() => void exportProfileToFile(p)}>
                           {t('btn.exportFile')}
                         </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        {/* Actions on the GATEWAY this profile reaches,
+                            not on the profile itself. */}
+                        <DropdownMenuLabel>{t('gw.title')}</DropdownMenuLabel>
+                        {gatewayActions.map((a) => {
+                          // Greyed only on a KNOWN answer: `undefined` means
+                          // the gateway was not asked, or could not answer.
+                          const off = a.needs === 'on' && estopOn[p.id] === false
+                          const already = a.needs === 'off' && estopOn[p.id] === true
+                          return (
+                          <DropdownMenuItem
+                            key={a.action}
+                            disabled={actionBusy || off || already}
+                            title={off ? t('gw.estopOff') : already ? t('gw.estopAlready') : undefined}
+                            onSelect={() => {
+                              if (a.confirm) {
+                                setPendingAction({
+                                  profile: p,
+                                  action: a.action,
+                                  label: t(a.label),
+                                  confirm: t(a.confirm),
+                                })
+                                return
+                              }
+                              void runGatewayAction(p, a.action, t(a.label), false)
+                            }}
+                          >
+                            {t(a.label)}
+                          </DropdownMenuItem>
+                          )
+                        })}
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           variant="destructive"
@@ -514,6 +623,60 @@ export default function Connect() {
             </li>
           ))}
         </ul>
+      )}
+
+      {pendingAction && (
+        <Card className="gap-3 border-destructive/40 py-5">
+          <CardContent className="flex flex-col gap-3 px-5">
+            <h2 className="font-heading text-lg text-foreground">{pendingAction.label}</h2>
+            <p className="text-sm text-destructive">{pendingAction.confirm}</p>
+            <p className="text-xs text-muted-foreground">{pendingAction.profile.name}</p>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" onClick={() => setPendingAction(null)}>
+                {t('btn.cancel')}
+              </Button>
+              {/* Its own verb, and the destructive colour: this card asks
+                  about revoking or stopping, and it used to confirm with
+                  «Импортировать» — the import preview's button, copied with
+                  the card. */}
+              <Button
+                variant="destructive"
+                disabled={actionBusy}
+                onClick={() =>
+                  void runGatewayAction(
+                    pendingAction.profile,
+                    pendingAction.action,
+                    pendingAction.label,
+                    true,
+                  )
+                }
+              >
+                {actionBusy ? <Spinner size={14} /> : null}
+                {t('gw.run')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {actionResult && (
+        <Card className="gap-3 py-5">
+          <CardContent className="flex flex-col gap-3 px-5">
+            <h2 className="font-heading text-lg text-foreground">
+              {t('gw.result', { action: actionResult.label })}
+            </h2>
+            {/* Selectable: a rotate prints the code that has to be typed
+                somewhere else. */}
+            <pre className="max-h-64 overflow-auto rounded-[var(--radius)] border border-border bg-card px-3 py-2 text-xs whitespace-pre-wrap select-text text-foreground">
+              {actionResult.text}
+            </pre>
+            <div className="flex justify-end">
+              <Button variant="outline" onClick={() => setActionResult(null)}>
+                {t('btn.close')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {pending && (

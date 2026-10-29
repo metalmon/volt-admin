@@ -1,4 +1,4 @@
-# Spec: three gateway actions in the launcher
+# Spec: gateway actions in the launcher
 
 **Status:** approved in scope, not implemented
 **Owner:** launcher (profile card menu, `crate::pair`'s exec path)
@@ -12,14 +12,14 @@ host, remembers where `voltd` lives, and types. The app already knows all
 three of those: it has the profile, it resolves the binary, and it runs
 commands there for pairing.
 
-## The three
+## The actions
 
 Chosen over a general "run a command on the gateway" (see Out of scope):
 
 | action | command | confirm |
 |---|---|---|
-| Re-issue the pairing code | `gateway get-paircode --rotate` | yes, naming what breaks |
-| Restart the gateway | `gateway restart` | no |
+| Revoke all pairings | `gateway get-paircode --rotate` | yes, naming what breaks |
+| Turn the emergency stop on | `config set security.estop.enabled true` | no |
 | Emergency stop | `estop --level kill-all` | yes, naming what stops |
 | Emergency stop — state | `estop status` | no |
 | Emergency stop — release | `estop resume` | no |
@@ -28,9 +28,23 @@ Chosen over a general "run a command on the gateway" (see Out of scope):
 diagnosis an administrator needs first is already in the app's own
 Diagnostics section.
 
-**`--rotate` revokes every paired token** and prints a fresh code. Every
+**`--rotate` revokes every paired token** and prints a fresh code. It is
+named for the revoking, not for the code: "re-issue the pairing code" reads
+like a convenience and this is not one. Every
 other client — phones, browsers, another admin's laptop — has to pair
 again. The confirmation says exactly that, not "are you sure".
+
+**The emergency stop ships disabled**, and until it is enabled all three of
+its items answer "Emergency stop is disabled. Enable [security.estop].enabled
+= true in config.toml" — which is why turning it on is an item too. Enabling
+takes nothing away, so it does not confirm; it writes one key and the gateway
+picks it up when it next reads its config.
+
+The menu asks `config get security.estop.enabled` when it opens and greys
+out what cannot work: the three stop items while it is off, the item that
+turns it on while it is on. Only on an ANSWER — a gateway that is down or
+unreachable leaves them clickable, the way they were before the question
+was asked.
 
 **`estop --level kill-all`** stops the deployment. Same rule for its
 confirmation. `domain-block` and `tool-freeze` need domain and tool
@@ -55,8 +69,8 @@ disabled with that reason, as auto-pairing already reports.
 ## The output
 
 Each action opens a result window with the command's text output,
-selectable and copyable. `doctor` was dropped, but the other three still
-have to be readable: `--rotate` PRINTS THE NEW CODE, which is the whole
+selectable and copyable. `doctor` was dropped, but what the rest print still
+has to be readable: `--rotate` PRINTS THE NEW CODE, which is the whole
 point of running it.
 
 **That output never reaches the log.** The log's rule stands — no codes, no
@@ -76,6 +90,15 @@ with nothing to fill it.
 - An arbitrary command box. The profile already carries one executable
   field (`paircodeCommand`), and the import preview shows it precisely
   because running what someone else typed is a decision, not a convenience.
+- `gateway restart`. It was in the menu until a live test: it answers
+  "config lifecycle is already owned" whenever a daemon or service holds the
+  gateway — which is every gateway the launcher is pointed at, since that
+  daemon is what serves the panel. The panel's own reload button works
+  because the DAEMON reloads itself: it owns the config lifecycle. An
+  outside process has to take that lock, and the owner does not give it up.
+  Doing what the panel does would mean calling the daemon's own HTTP route,
+  i.e. duplicating a button in the window the launcher has just opened.
+  (`voltd config set` needs no such lock, so the estop items are unaffected.)
 - `service start/stop/restart`. On a `Remote` profile the SSH lands inside
   the deployment that would be stopped — including its sshd. One click,
   no way back.
@@ -86,10 +109,18 @@ with nothing to fill it.
 
 - Rotating from the menu shows the new code, and the next connect to that
   profile pairs again by itself rather than opening a pairing form.
-- Restarting a gateway whose panel had stopped answering makes it answer,
-  without touching the daemon.
 - An emergency stop asks a question that names what stops, and its state
-  and release are one item each.
+  and release are one item each. On a gateway where `[security.estop]` is
+  not enabled, the item says so in voltd's own words — it names the setting
+  to change — rather than appearing to do nothing.
 - A failed action shows what the command printed, starting with the line
   that says why — not its tail.
+- Turning the emergency stop on makes its state item answer with a state
+  instead of with "disabled", and the three stop items are greyed out until
+  it is on.
 - Nothing in the log contains a pairing code.
+- A connect after any rotate — ours or one typed on the gateway — lands on
+  the panel signed in, not on its pairing form: the session this app hands
+  over REPLACES whatever the panel had, because a rotate leaves a dead token
+  in its storage and a panel that boots signed out also boots in its own
+  language.

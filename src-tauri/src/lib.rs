@@ -1,3 +1,4 @@
+mod actions;
 mod commands;
 mod connection;
 mod logx;
@@ -161,6 +162,7 @@ pub fn run() {
             commands::collect_diagnostics,
             commands::new_window,
             commands::set_language,
+            commands::run_gateway_action,
             commands::delete_profile,
             commands::connect,
             commands::disconnect

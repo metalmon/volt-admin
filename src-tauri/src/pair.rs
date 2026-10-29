@@ -144,16 +144,26 @@ pub fn paircode_command(p: &Profile) -> String {
     // `<config-dir>/bin` and the daemon is started by its full path, so a
     // bare `voltd` only produces "is not recognized as an internal or
     // external command".
+    format!(
+        "{} gateway get-paircode --new --port {} --principal {}",
+        voltd_binary(p),
+        p.panel_port,
+        principal(p)
+    )
+}
+
+/// The `voltd` to run for this profile, ready to head a command line.
+///
+/// `Remote` runs on the server, where the kit puts voltd on PATH.
+/// `Local` runs here, where a native install does NOT: the binary sits
+/// in `<config-dir>/bin`, and a bare name only produces "is not
+/// recognized as an internal or external command".
+pub fn voltd_binary(p: &Profile) -> String {
     let binary = match p.mode {
         ConnMode::Local => local_voltd_binary().unwrap_or_else(|| "voltd".into()),
         ConnMode::Remote => "voltd".into(),
     };
-    format!(
-        "{} gateway get-paircode --new --port {} --principal {}",
-        quote_if_needed(&binary),
-        p.panel_port,
-        principal(p)
-    )
+    quote_if_needed(&binary)
 }
 
 /// Both shells here (`cmd /C`, `sh -c`) take one string, so a path with a
@@ -462,7 +472,7 @@ pub fn token_script(token: &str) -> String {
 
 /// Run `command` through the local shell, windowless, with a timeout; returns
 /// stdout+stderr combined (voltd prints the code on stderr).
-async fn run_local(command: &str) -> Result<String, String> {
+pub async fn run_local(command: &str) -> Result<String, String> {
     #[cfg(windows)]
     let mut cmd = {
         let mut c = Command::new("cmd");
@@ -504,7 +514,11 @@ pub async fn collect_output(
     if out.status.success() {
         Ok(text)
     } else {
-        Err(format!("exit {}: {}", out.status, tail_of(&text, 200)))
+        // `ExitStatus` already prints as "exit code: 1"; prefixing it with
+        // "exit" produced "exit exit code: 1" on screen. And the reason a
+        // command gives comes FIRST — voltd names the config key to change
+        // — so the head is what to show, not the tail.
+        Err(format!("{}: {}", out.status, head_of(&text, 200)))
     }
 }
 
@@ -515,16 +529,6 @@ pub async fn collect_output(
 fn head_of(s: &str, max: usize) -> String {
     let t: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     t.chars().take(max).collect()
-}
-
-fn tail_of(s: &str, max: usize) -> String {
-    let t: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if t.chars().count() <= max {
-        t
-    } else {
-        let start = t.chars().count() - max;
-        t.chars().skip(start).collect()
-    }
 }
 
 /// First run of 24..=64 ASCII alphanumerics delimited by non-alphanumerics:
@@ -589,6 +593,12 @@ body:JSON.stringify({{code:'{code}',device_name:'Volt Admin',device_type:'browse
 /// WebView2's `ContentLoading`). The panel then boots already signed in:
 /// no pairing form, no reload, and its language comes from the server on
 /// the first paint.
+///
+/// It OVERWRITES. The token we inject was minted for this connect, so it is
+/// newer than anything in the panel's storage — and what was there can be
+/// dead: any `get-paircode --rotate` revokes every token the gateway has
+/// issued, leaving the panel to boot signed out, in its own language, asking
+/// for a code this app is holding.
 pub fn session_script(origin: &str, token: &str) -> String {
     // The script checks the origin ITSELF. `eval` only queues it: between
     // queuing and running, the page can have gone somewhere else, and a
@@ -596,7 +606,7 @@ pub fn session_script(origin: &str, token: &str) -> String {
     // navigation moved under us.
     format!(
         "(function(){{try{{if(location.origin!=='{origin}')return;var K='zeroclaw_token';\
-if(!localStorage.getItem(K))localStorage.setItem(K,'{token}');}}catch(e){{}}}})();",
+localStorage.setItem(K,'{token}');}}catch(e){{}}}})();",
         origin = js_str(origin),
         token = js_str(token)
     )
@@ -849,11 +859,15 @@ mod tests {
     }
 
     #[test]
-    fn the_session_script_only_writes_when_there_is_nothing_there() {
-        // Overwriting would log the panel out of a session it already has;
-        // and a quote in the token must not end the literal early.
+    fn the_session_script_replaces_whatever_the_panel_had() {
+        // It used to refuse to overwrite — and a token the gateway has
+        // revoked (any rotate does that) stayed in the panel's storage, so
+        // the panel booted signed out, in ITS language, with a pairing form,
+        // while this app had a working token in hand. We only inject one we
+        // just minted, so it is always the newer of the two.
         let script = session_script("http://127.0.0.1:42617", "a'b");
-        assert!(script.contains("if(!localStorage.getItem(K))"), "{script}");
+        assert!(!script.contains("if(!localStorage.getItem(K))"), "{script}");
+        assert!(script.contains("localStorage.setItem(K,"), "{script}");
         assert!(script.contains(r"'a\'b'"), "{script}");
         assert!(
             script.contains("location.origin!=='http://127.0.0.1:42617'"),
