@@ -46,7 +46,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> tauri::Result<()> 
         .expect("the app always ships an icon");
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .tooltip(windows::LAUNCHER_TITLE)
+        .tooltip(windows::launcher_title(lang))
         .menu(&build_menu(app, lang)?)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {

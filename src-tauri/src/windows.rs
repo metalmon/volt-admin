@@ -24,9 +24,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
-/// Window title while nothing is connected; `commands::connect` replaces it
-/// with the connection's identity.
-pub const LAUNCHER_TITLE: &str = "Вольт Админ";
+use crate::tunnel::Lang;
+
+/// Window title while nothing is connected, in the language the user chose
+/// (`crate::settings`). `commands::connect` replaces it with the
+/// connection's identity, in the same language.
+pub fn launcher_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Ru => "Вольт Админ",
+        Lang::En => "Volt Admin",
+    }
+}
 
 static NEXT: AtomicUsize = AtomicUsize::new(1);
 
@@ -56,8 +64,20 @@ pub fn open_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindo
         .cloned()
         .unwrap_or_default();
     config.label = next_label();
-    config.title = LAUNCHER_TITLE.to_string();
+    config.title = launcher_title(crate::settings::language(app)).to_string();
+    let lang = crate::settings::language(app);
     let window = WebviewWindowBuilder::from_config(app, &config)?
+        // The PANEL picks its language from `navigator.language` until it
+        // has a session, and WebView2 answers `en-US` whatever Windows is
+        // set to — so a Russian user met an English pairing form and the
+        // panel only switched after pairing. `--lang` is how the webview is
+        // told, and it is the language the user chose here.
+        //
+        // wry's own defaults have to be repeated: this REPLACES them.
+        .additional_browser_args(&format!(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --lang={}",
+            lang.code()
+        ))
         // The config's `backgroundColor` reaches the WINDOW layer only —
         // `WebviewAttributes::from(&WindowConfig)` does not carry it — and
         // the white flash when a page is replaced comes from the WEBVIEW
@@ -142,7 +162,7 @@ pub async fn release_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
 pub fn hide_as_closed<R: Runtime>(window: &WebviewWindow<R>) {
     let app = window.app_handle().clone();
     let label = window.label().to_string();
-    let _ = window.set_title(LAUNCHER_TITLE);
+    let _ = window.set_title(launcher_title(crate::settings::language(&app)));
     if let Some(url) = app.state::<crate::commands::StartUrl>().get() {
         let _ = window.navigate(url);
     }

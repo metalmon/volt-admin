@@ -200,6 +200,15 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     }
   }, [lang])
 
+  // Tell the Rust side what we are showing — on the very first run nothing
+  // is stored there yet, so the window title and the tray would otherwise
+  // sit in the default language while the UI is in the detected one.
+  useEffect(() => {
+    void invoke('set_language', { lang }).catch(() => {
+      /* the title and tray keep the previous language; nothing else does */
+    })
+  }, [lang])
+
   const setLang = (l: Lang) => {
     setLangState(l)
     try {

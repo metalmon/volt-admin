@@ -102,6 +102,18 @@ fn as_ui_error(reason: String) -> String {
 pub fn set_language<R: Runtime>(app: AppHandle<R>, lang: String) -> Result<(), String> {
     let lang = Lang::from_code(Some(&lang));
     crate::settings::set_language(&app, lang)?;
+    // Windows still showing the launcher follow along. A connected window's
+    // title names its connection and is rewritten by the next `connect`.
+    let launcher = crate::windows::launcher_title(lang);
+    let other = crate::windows::launcher_title(match lang {
+        Lang::Ru => Lang::En,
+        Lang::En => Lang::Ru,
+    });
+    for window in app.webview_windows().values() {
+        if window.title().is_ok_and(|t| t == other) {
+            let _ = window.set_title(launcher);
+        }
+    }
     crate::tray::relabel(&app, lang).map_err(|e| e.to_string())
 }
 
@@ -509,7 +521,12 @@ pub async fn connect<R: Runtime>(
     navigate(&window, url)?;
 
     // Connection identity in the OS title bar, per window.
-    let _ = window.set_title(&format!("{} ({}) — Вольт Админ", profile.name, endpoint));
+    let _ = window.set_title(&format!(
+        "{} ({}) — {}",
+        profile.name,
+        endpoint,
+        crate::windows::launcher_title(lang)
+    ));
 
     logx::log("connect", "done");
     Ok(ConnectResult { base_url })
@@ -550,7 +567,9 @@ pub async fn disconnect<R: Runtime>(
     }
 
     // Back to the launcher identity in the title bar.
-    let _ = window.set_title("Вольт Админ");
+    let _ = window.set_title(crate::windows::launcher_title(crate::settings::language(
+        &window.app_handle().clone(),
+    )));
 
     match start_url.get() {
         Some(url) => navigate(&window, url),
