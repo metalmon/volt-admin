@@ -136,6 +136,23 @@ pub fn hide_as_closed<R: Runtime>(window: &WebviewWindow<R>) {
     });
 }
 
+/// The page's own background, so the native surface does not flash white
+/// before the first paint. Kept beside the tokens it mirrors:
+/// `--color-background` in `src/index.css`, light and `.dark`.
+const BACKGROUND_LIGHT: tauri::window::Color = tauri::window::Color(0xf5, 0xf2, 0xee, 0xff);
+const BACKGROUND_DARK: tauri::window::Color = tauri::window::Color(0x1b, 0x1e, 0x1f, 0xff);
+
+/// Paint the window in the theme the OS is using, before anything loads in
+/// it. The frontend follows `prefers-color-scheme` (see `src/main.tsx`), so
+/// this has to follow the same answer.
+pub fn paint_for_theme<R: Runtime>(window: &WebviewWindow<R>) {
+    let color = match window.theme() {
+        Ok(tauri::Theme::Dark) => BACKGROUND_DARK,
+        _ => BACKGROUND_LIGHT,
+    };
+    let _ = window.set_background_color(Some(color));
+}
+
 /// Cap a window to the monitor's work area (the screen minus the taskbar).
 /// The configured size is picked so the profile form fits without a
 /// scrollbar on a normal screen; this is the small-screen fallback. Runs

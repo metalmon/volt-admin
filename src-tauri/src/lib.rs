@@ -177,6 +177,7 @@ pub fn run() {
                 // overriding the conf default so it matches the connected title.
                 for window in app.webview_windows().values() {
                     let _ = window.set_title(windows::LAUNCHER_TITLE);
+                    windows::paint_for_theme(window);
                     windows::fit_to_screen(window);
                 }
 

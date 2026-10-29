@@ -4,7 +4,15 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>Вольт Админ</title>
+    <!-- Painted before the CSS bundle arrives, so a window does not flash
+         white on its way up. The two values mirror `--color-background` in
+         src/index.css (light and .dark) and the native window colour in
+         src-tauri/src/windows.rs; the app follows the OS theme. -->
+    <style>
+      :root { background: #f5f2ee; color-scheme: light dark; }
+      @media (prefers-color-scheme: dark) { :root { background: #1b1e1f; } }
+    </style>
   </head>
 
   <body>
