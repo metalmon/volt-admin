@@ -22,7 +22,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 /// Window title while nothing is connected; `commands::connect` replaces it
 /// with the connection's identity.
@@ -37,14 +37,45 @@ fn next_label() -> String {
 }
 
 /// Open a window on the app's own entry point — the Connect screen.
+///
+/// Built from the SAME config as the first window, with only the label
+/// changed: hand-rolling the builder meant hand-rolling the URL too, and a
+/// window whose webview never loaded anything is just a white rectangle.
+/// It also keeps the size in one place — `tauri.conf.json`.
 pub fn open_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
-    let window = WebviewWindowBuilder::new(app, next_label(), WebviewUrl::App("index.html".into()))
-        .title(LAUNCHER_TITLE)
-        .inner_size(1180.0, 1000.0)
-        .min_inner_size(900.0, 640.0)
-        .build()?;
+    let mut config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    config.label = next_label();
+    config.title = LAUNCHER_TITLE.to_string();
+    let window = WebviewWindowBuilder::from_config(app, &config)?.build()?;
     fit_to_screen(&window);
     Ok(window)
+}
+
+/// Ask for another window. THE only way to get one — the tray and the UI
+/// button both come through here, so there is one behaviour to reason about
+/// and one place to debug.
+///
+/// The work is handed to the thread that runs the event loop. Building a
+/// WebView2 anywhere else, or inline inside the handling of the IPC message
+/// that asked for it, produced a blank window and then a wedged app;
+/// `run_on_main_thread` runs it immediately when the caller is already the
+/// event loop (the tray's menu handler) and posts it otherwise (a command).
+pub fn request_new_window<R: Runtime>(app: &AppHandle<R>) {
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        if let Err(e) = open_window(&handle) {
+            crate::logx::log("window", &format!("open_window failed: {e}"));
+        }
+    });
+    if let Err(e) = queued {
+        crate::logx::log("window", &format!("could not reach the event loop: {e}"));
+    }
 }
 
 /// Bring a window to the user: the first one there, or a new one.

@@ -51,9 +51,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> tauri::Result<()> 
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             OPEN_ID => windows::show_a_window(app),
-            NEW_ID => {
-                let _ = windows::open_window(app);
-            }
+            NEW_ID => windows::request_new_window(app),
             QUIT_ID => app.exit(0),
             _ => {}
         })

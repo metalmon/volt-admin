@@ -108,26 +108,15 @@ pub fn set_language<R: Runtime>(app: AppHandle<R>, lang: String) -> Result<(), S
 /// Open another window on the Connect screen. The app is one process with
 /// several windows now (see `crate::windows`), so this is how a second
 /// connection is started without launching the exe again.
-/// ASYNC on purpose, and the work is QUEUED for the event loop.
-///
-/// A synchronous command is dispatched on the thread that runs the event
-/// loop, and building a WebView2 right there — inside the handling of the
-/// IPC message that asked for it — wedges the whole app: the window comes
-/// up blank and the UI stops answering. The same call from the tray menu
-/// has always worked, because a menu event is handled at the top of the
-/// loop rather than nested inside an IPC dispatch.
-///
-/// `async` puts this on the async runtime instead, so `run_on_main_thread`
-/// posts the work and the loop picks it up at a point where it is safe.
+/// ASYNC on purpose: a synchronous command is dispatched on the thread that
+/// runs the event loop, and `windows::request_new_window` would then build
+/// the webview inline, nested inside the handling of this very IPC message
+/// — which came up blank and wedged the app. On the async runtime the work
+/// is posted to the loop instead.
 #[command]
 pub async fn new_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let handle = app.clone();
-    app.run_on_main_thread(move || {
-        if let Err(e) = crate::windows::open_window(&handle) {
-            logx::log("window", &format!("new_window failed: {e}"));
-        }
-    })
-    .map_err(|e| e.to_string())
+    crate::windows::request_new_window(&app);
+    Ok(())
 }
 
 /// Write a saved profile to a JSON file in the user's download directory and
