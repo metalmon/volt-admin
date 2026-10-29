@@ -73,7 +73,7 @@ pub fn run() {
             if payload.event() == tauri::webview::PageLoadEvent::Started {
                 if let Some(ctx) = webview.state::<pair::PairState>().for_url(payload.url()) {
                     if let Some(token) = &ctx.session_token {
-                        let _ = webview.eval(pair::session_script(token));
+                        let _ = webview.eval(pair::session_script(&ctx.origin, token));
                         logx::log("page_load", "session handed over before scripts");
                     }
                 }

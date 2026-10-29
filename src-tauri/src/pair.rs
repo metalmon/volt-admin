@@ -581,9 +581,15 @@ body:JSON.stringify({{code:'{code}',device_name:'Volt Admin',device_type:'browse
 /// WebView2's `ContentLoading`). The panel then boots already signed in:
 /// no pairing form, no reload, and its language comes from the server on
 /// the first paint.
-pub fn session_script(token: &str) -> String {
+pub fn session_script(origin: &str, token: &str) -> String {
+    // The script checks the origin ITSELF. `eval` only queues it: between
+    // queuing and running, the page can have gone somewhere else, and a
+    // session token must never land in another origin's storage because a
+    // navigation moved under us.
     format!(
-        "(function(){{try{{var K='zeroclaw_token';if(!localStorage.getItem(K))localStorage.setItem(K,'{token}');}}catch(e){{}}}})();",
+        "(function(){{try{{if(location.origin!=='{origin}')return;var K='zeroclaw_token';\
+if(!localStorage.getItem(K))localStorage.setItem(K,'{token}');}}catch(e){{}}}})();",
+        origin = js_str(origin),
         token = js_str(token)
     )
 }
@@ -838,9 +844,13 @@ mod tests {
     fn the_session_script_only_writes_when_there_is_nothing_there() {
         // Overwriting would log the panel out of a session it already has;
         // and a quote in the token must not end the literal early.
-        let script = session_script("a'b");
+        let script = session_script("http://127.0.0.1:42617", "a'b");
         assert!(script.contains("if(!localStorage.getItem(K))"), "{script}");
         assert!(script.contains(r"'a\'b'"), "{script}");
+        assert!(
+            script.contains("location.origin!=='http://127.0.0.1:42617'"),
+            "a token must not be written to another origin: {script}"
+        );
     }
 
     #[test]
