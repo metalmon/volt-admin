@@ -105,7 +105,9 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 // Multi-copy model: no tray. Closing the window quits this
-                // copy (its TunnelState Drop kills the ssh child). The only
+                // copy, and the `Registry` goes down with it — every
+                // `Connection` it holds drops, and each tunnel's own Drop
+                // kills its ssh child (see `crate::registry`). The only
                 // state we still register is the StartUrl holder so the
                 // `disconnect` command can navigate back to the launcher
                 // (captured lazily on the first connect — see commands::StartUrl).

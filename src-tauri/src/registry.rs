@@ -43,6 +43,12 @@ pub struct Connection {
     /// Where the panel answers on this machine.
     pub local_port: u16,
     holders: HashSet<Holder>,
+    /// Test-only payload, so a test can prove a `Connection` really was
+    /// dropped without building a `Tunnel` (which would spawn `ssh`).
+    /// Never read, like `tunnel`: being dropped is the whole job.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    probe: Option<std::sync::Arc<()>>,
 }
 
 /// Tauri-managed state: every connection this app currently holds open.
@@ -76,6 +82,8 @@ impl Registry {
                 tunnel,
                 local_port,
                 holders: HashSet::from([holder]),
+                #[cfg(test)]
+                probe: None,
             },
         );
     }
@@ -127,6 +135,28 @@ impl Registry {
             true
         });
         dropped
+    }
+
+    /// [`Self::publish`] carrying a payload the test can watch die with the
+    /// connection.
+    #[cfg(test)]
+    async fn publish_with_probe(
+        &self,
+        profile_id: &str,
+        local_port: u16,
+        holder: Holder,
+        probe: std::sync::Arc<()>,
+    ) {
+        let mut map = self.0.lock().await;
+        map.insert(
+            profile_id.to_string(),
+            Connection {
+                tunnel: None,
+                local_port,
+                holders: HashSet::from([holder]),
+                probe: Some(probe),
+            },
+        );
     }
 
     /// Where this profile's panel answers, if it is connected. For the
@@ -210,6 +240,28 @@ mod tests {
         let dropped = r.release_others(Holder::Window, "b").await;
         assert_eq!(dropped, vec!["a".to_string()]);
         assert_eq!(r.local_port("b").await, Some(9001));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_registry_drops_every_connection() {
+        // The app quitting must take every ssh child with it, which it does
+        // by dropping the map. A real `Tunnel` cannot be built in a test, so
+        // the proof is a payload whose `Weak` dies with its `Connection`.
+        let payloads: Vec<std::sync::Arc<()>> = (0..3).map(|_| std::sync::Arc::new(())).collect();
+        let weak: Vec<std::sync::Weak<()>> =
+            payloads.iter().map(std::sync::Arc::downgrade).collect();
+        let registry = Registry::default();
+        for (i, payload) in payloads.into_iter().enumerate() {
+            registry
+                .publish_with_probe(&format!("p{i}"), 9000 + i as u16, Holder::Window, payload)
+                .await;
+        }
+        assert_eq!(registry.len().await, 3);
+        drop(registry);
+        assert!(
+            weak.iter().all(|w| w.upgrade().is_none()),
+            "a connection outlived the registry"
+        );
     }
 
     #[tokio::test]
