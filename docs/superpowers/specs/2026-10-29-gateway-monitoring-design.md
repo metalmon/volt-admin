@@ -66,8 +66,13 @@ which is also why `preferred_port` being stable per profile matters: the
 panel's stored session survives.
 
 **My call:** this is the piece that makes everything else possible, and it
-is worth doing on its own even if monitoring is dropped — "connect to A,
-then to B, then back to A" currently rebuilds tunnels for no reason.
+pays for itself before monitoring exists — but not the way I first wrote
+it. While the window is the only holder, switching to another profile still
+releases the first connection, so "A → B → A" still rebuilds. What phase 1
+actually buys is the ordering: the new connection is published BEFORE the
+old one is released, so a connect that fails no longer leaves the
+administrator with nothing, which is what today's "clear, then try" does.
+Tunnel reuse arrives with `Holder::Monitor`, in phase 3.
 
 ### 2. One process, a tray, and windows that come and go
 
@@ -235,8 +240,10 @@ a command: the watcher already knows when something changed.
 
 Each phase is shippable on its own.
 
-1. **Registry** (§1). Behaviour visible to the user: switching back to a
-   profile you already opened no longer rebuilds its tunnel. No monitoring.
+1. **Registry** (§1), planned in
+   `docs/superpowers/plans/2026-10-29-connection-registry.md`. Visible to
+   the user: a failed connect no longer tears down the connection that was
+   working. No monitoring.
 2. **Single instance + tray + windows** (§2). Still no monitoring; the app
    simply stops being N processes.
 3. **Pairing + client + one watcher, UI only** (§3–§4, §7 without the tray
