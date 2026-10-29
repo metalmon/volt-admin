@@ -144,16 +144,26 @@ pub fn paircode_command(p: &Profile) -> String {
     // `<config-dir>/bin` and the daemon is started by its full path, so a
     // bare `voltd` only produces "is not recognized as an internal or
     // external command".
+    format!(
+        "{} gateway get-paircode --new --port {} --principal {}",
+        voltd_binary(p),
+        p.panel_port,
+        principal(p)
+    )
+}
+
+/// The `voltd` to run for this profile, ready to head a command line.
+///
+/// `Remote` runs on the server, where the kit puts voltd on PATH.
+/// `Local` runs here, where a native install does NOT: the binary sits
+/// in `<config-dir>/bin`, and a bare name only produces "is not
+/// recognized as an internal or external command".
+pub fn voltd_binary(p: &Profile) -> String {
     let binary = match p.mode {
         ConnMode::Local => local_voltd_binary().unwrap_or_else(|| "voltd".into()),
         ConnMode::Remote => "voltd".into(),
     };
-    format!(
-        "{} gateway get-paircode --new --port {} --principal {}",
-        quote_if_needed(&binary),
-        p.panel_port,
-        principal(p)
-    )
+    quote_if_needed(&binary)
 }
 
 /// Both shells here (`cmd /C`, `sh -c`) take one string, so a path with a
@@ -462,7 +472,7 @@ pub fn token_script(token: &str) -> String {
 
 /// Run `command` through the local shell, windowless, with a timeout; returns
 /// stdout+stderr combined (voltd prints the code on stderr).
-async fn run_local(command: &str) -> Result<String, String> {
+pub async fn run_local(command: &str) -> Result<String, String> {
     #[cfg(windows)]
     let mut cmd = {
         let mut c = Command::new("cmd");
