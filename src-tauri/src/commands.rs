@@ -110,9 +110,17 @@ pub fn set_language<R: Runtime>(app: AppHandle<R>, lang: String) -> Result<(), S
 /// connection is started without launching the exe again.
 #[command]
 pub fn new_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    crate::windows::open_window(&app)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    // ON THE MAIN THREAD. A command runs on a worker thread, and a webview
+    // built there came up as a blank white window on Windows — the same
+    // call from the tray menu, which the event loop runs, has always
+    // worked. That difference is the whole bug.
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(e) = crate::windows::open_window(&handle) {
+            logx::log("window", &format!("new_window failed: {e}"));
+        }
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Write a saved profile to a JSON file in the user's download directory and
