@@ -275,10 +275,10 @@ pub async fn mint_code(
         ),
     }
     code.ok_or_else(|| {
-        let tail = tail_of(&output, 160);
+        let said = head_of(&output, 200);
         match lang {
-            Lang::Ru => format!("команда кода сопряжения не вернула код: {tail}"),
-            Lang::En => format!("the pairing-code command printed no code: {tail}"),
+            Lang::Ru => format!("команда кода сопряжения не вернула код: {said}"),
+            Lang::En => format!("the pairing-code command printed no code: {said}"),
         }
     })
 }
@@ -450,6 +450,15 @@ pub async fn collect_output(
     } else {
         Err(format!("exit {}: {}", out.status, tail_of(&text, 200)))
     }
+}
+
+/// The BEGINNING of a command's output, whitespace collapsed. voltd leads
+/// with the reason it refused — "principal 'admin' is not configured" — and
+/// follows it with general advice, so a tail shows the advice and hides the
+/// reason.
+fn head_of(s: &str, max: usize) -> String {
+    let t: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    t.chars().take(max).collect()
 }
 
 fn tail_of(s: &str, max: usize) -> String {
@@ -762,6 +771,25 @@ mod tests {
         let kept = tauri::Url::parse("http://127.0.0.1:41002/").unwrap();
         assert!(state.for_url(&gone).is_none());
         assert!(state.for_url(&kept).is_some());
+    }
+
+    #[test]
+    fn the_no_code_message_leads_with_what_went_wrong() {
+        // voltd puts the reason FIRST and general advice after it, so the
+        // tail is the least useful part — which is what a real refusal
+        // looked like: the user saw "…or revoke existing pairings…" and not
+        // "principal 'admin' is not configured".
+        let output = "
+  ⚠️  Principal 'admin' is not configured; add it under [[authz.principals]] before minting a code for it.
+
+To add another client use --new, or revoke existing pairings and issue a fresh code: voltd gateway get-paircode --rotate
+";
+        let shown = head_of(output, 80);
+        assert!(
+            shown.starts_with("⚠️ Principal 'admin' is not configured"),
+            "{shown}"
+        );
+        assert!(!shown.contains("--rotate"), "the advice is not the reason");
     }
 
     #[test]

@@ -51,6 +51,13 @@ pub fn run() {
                     tauri_plugin_window_state::StateFlags::POSITION
                         | tauri_plugin_window_state::StateFlags::SIZE,
                 )
+                // Geometry is remembered per LABEL, and labels are handed out
+                // per run (`main`, `win-1`, …) — so a window opened from the
+                // tray would be "a different window" and land at the default
+                // position. Every window shares one remembered geometry
+                // instead: what the user wants is "it opens where I left it",
+                // not a different memory per slot.
+                .map_label(|_| "window")
                 .build(),
         )
         .manage(registry::Registry::default())

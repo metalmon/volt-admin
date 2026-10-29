@@ -61,36 +61,51 @@ pub fn show_a_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Cap a window to the monitor's work area (the screen minus the taskbar),
-/// re-centering it when it had to shrink. The configured size is picked so
-/// the profile form fits without a scrollbar on a normal screen; this is the
-/// small-screen fallback. Runs once per window, at creation — nothing
-/// resizes a window while it is in use.
-#[cfg(desktop)]
+/// Cap a window to the monitor's work area (the screen minus the taskbar).
+/// The configured size is picked so the profile form fits without a
+/// scrollbar on a normal screen; this is the small-screen fallback. Runs
+/// once per window, at creation — nothing resizes a window while it is in
+/// use.
+///
+/// It does NOT re-centre. Centring threw away the position the window-state
+/// plugin had just restored, every time the window was a hair taller than
+/// the work area — which on a 1080p screen is most of the time. A window
+/// that ends up hanging off the edge is nudged back in, and one that fits
+/// is left exactly where the user put it.
 pub fn fit_to_screen<R: Runtime>(window: &WebviewWindow<R>) {
     let Ok(Some(monitor)) = window.current_monitor() else {
         return;
     };
-    let (Ok(inner), Ok(outer)) = (window.inner_size(), window.outer_size()) else {
+    let (Ok(inner), Ok(outer), Ok(position)) = (
+        window.inner_size(),
+        window.outer_size(),
+        window.outer_position(),
+    ) else {
         return;
     };
-    // The decorations are part of the work area budget but not of `set_size`,
-    // which takes the INNER size.
-    let area = monitor.work_area().size;
-    let max_w = area
-        .width
-        .saturating_sub(outer.width.saturating_sub(inner.width));
-    let max_h = area
-        .height
-        .saturating_sub(outer.height.saturating_sub(inner.height));
-    if inner.width <= max_w && inner.height <= max_h {
-        return;
+    // The decorations are part of the work area budget but not of
+    // `set_size`, which takes the INNER size.
+    let area = monitor.work_area();
+    let chrome_w = outer.width.saturating_sub(inner.width);
+    let chrome_h = outer.height.saturating_sub(inner.height);
+    let max_w = area.size.width.saturating_sub(chrome_w);
+    let max_h = area.size.height.saturating_sub(chrome_h);
+    if inner.width > max_w || inner.height > max_h {
+        let _ = window.set_size(tauri::PhysicalSize::new(
+            inner.width.min(max_w),
+            inner.height.min(max_h),
+        ));
     }
-    let _ = window.set_size(tauri::PhysicalSize::new(
-        inner.width.min(max_w),
-        inner.height.min(max_h),
-    ));
-    let _ = window.center();
+    // Nudge back inside, keeping as much of the user's position as fits.
+    let outer_w = inner.width.min(max_w) + chrome_w;
+    let outer_h = inner.height.min(max_h) + chrome_h;
+    let right = area.position.x + area.size.width as i32;
+    let bottom = area.position.y + area.size.height as i32;
+    let x = position.x.min(right - outer_w as i32).max(area.position.x);
+    let y = position.y.min(bottom - outer_h as i32).max(area.position.y);
+    if (x, y) != (position.x, position.y) {
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
 }
 
 #[cfg(test)]
