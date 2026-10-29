@@ -27,10 +27,10 @@ const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 pub enum GatewayAction {
     /// Revoke every paired token and issue a fresh code.
     RotatePairing,
-    /// Is the emergency stop enabled at all? Asked before the menu is
-    /// drawn, so its three items can be greyed out instead of all
-    /// answering "Emergency stop is disabled".
-    EmergencyEnabled,
+    /// The gateway's security settings, read before the menu is drawn:
+    /// whether the emergency stop is enabled at all, and whether an engaged
+    /// one could be released again.
+    SecurityConfig,
     /// Turn the emergency stop ON in the gateway's config — it ships
     /// disabled, and the other three answer "Emergency stop is disabled"
     /// until it is.
@@ -48,7 +48,7 @@ impl GatewayAction {
     pub fn args(self) -> &'static str {
         match self {
             Self::RotatePairing => "gateway get-paircode --rotate",
-            Self::EmergencyEnabled => "config get security.estop.enabled",
+            Self::SecurityConfig => "config list --filter security",
             Self::EmergencyEnable => "config set security.estop.enabled true",
             Self::EmergencyStop => "estop --level kill-all",
             Self::EmergencyStatus => "estop status",
@@ -161,6 +161,43 @@ fn safe_error(action: GatewayAction, e: String, lang: Lang) -> String {
     }
 }
 
+/// What the menu needs to know before it is drawn.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityFlags {
+    /// `security.estop.enabled` — until this is true, every stop item just
+    /// answers "Emergency stop is disabled".
+    pub estop_enabled: bool,
+    /// Could an engaged stop be released again? False only when a resume
+    /// needs an OTP that is switched off — voltd then refuses the resume,
+    /// and a stop engaged in that state has no way back from here.
+    pub can_resume: bool,
+}
+
+/// Read the three lines that matter out of `config list --filter security`.
+///
+/// Absent or unreadable keys claim NOTHING: no greying, no warning. The
+/// probe is best-effort (the gateway may be down), and a guess in either
+/// direction is worse than silence.
+pub fn security_flags(listing: &str) -> SecurityFlags {
+    let flag = |key: &str| -> Option<bool> {
+        listing
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with(key) && l[key.len()..].trim_start().starts_with('='))?
+            .split('=')
+            .nth(1)?
+            .split_whitespace()
+            .next()
+            .map(|v| v == "true")
+    };
+    SecurityFlags {
+        estop_enabled: flag("security.estop.enabled") == Some(true),
+        can_resume: !(flag("security.estop.require_otp_to_resume") == Some(true)
+            && flag("security.otp.enabled") == Some(false)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,12 +239,50 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_asks_the_config_whether_the_stop_is_enabled() {
+    fn the_probe_reads_the_security_section_in_one_command() {
         assert_eq!(
-            GatewayAction::EmergencyEnabled.args(),
-            "config get security.estop.enabled"
+            GatewayAction::SecurityConfig.args(),
+            "config list --filter security"
         );
-        assert!(!GatewayAction::EmergencyEnabled.confirms());
+        assert!(!GatewayAction::SecurityConfig.confirms());
+    }
+
+    /// What `voltd config list --filter security` prints, trimmed to the
+    /// three lines this reads.
+    const LISTING: &str = "Security:
+  security.otp.enabled                 = false        (bool)
+  security.estop.enabled               = true         (bool)
+  security.estop.require_otp_to_resume = true         (bool)
+";
+
+    #[test]
+    fn a_stop_that_could_not_be_released_is_seen_before_it_is_engaged() {
+        // The trap this exists for: estop on, resume gated behind an OTP
+        // that is off. Engaging then stops the deployment with nothing in
+        // the app — or the CLI — able to resume it.
+        let flags = security_flags(LISTING);
+        assert!(flags.estop_enabled);
+        assert!(!flags.can_resume);
+
+        let with_otp = LISTING.replace(
+            "otp.enabled                 = false",
+            "otp.enabled                 = true",
+        );
+        assert!(security_flags(&with_otp).can_resume);
+        let no_gate = LISTING.replace(
+            "require_otp_to_resume = true",
+            "require_otp_to_resume = false",
+        );
+        assert!(security_flags(&no_gate).can_resume);
+    }
+
+    #[test]
+    fn a_listing_that_says_nothing_claims_nothing() {
+        // An unreadable or empty answer must not grey out the menu or warn
+        // about a trap: unknown is not "false".
+        let flags = security_flags("");
+        assert!(!flags.estop_enabled);
+        assert!(flags.can_resume, "no evidence of a gate is not a gate");
     }
 
     #[test]
@@ -230,7 +305,7 @@ mod tests {
     fn only_the_rotate_prints_a_secret() {
         assert!(GatewayAction::RotatePairing.prints_secret());
         for action in [
-            GatewayAction::EmergencyEnabled,
+            GatewayAction::SecurityConfig,
             GatewayAction::EmergencyEnable,
             GatewayAction::EmergencyStop,
             GatewayAction::EmergencyStatus,

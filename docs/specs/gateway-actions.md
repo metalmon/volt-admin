@@ -40,11 +40,19 @@ its items answer "Emergency stop is disabled. Enable [security.estop].enabled
 takes nothing away, so it does not confirm; it writes one key and the gateway
 picks it up when it next reads its config.
 
-The menu asks `config get security.estop.enabled` when it opens and greys
-out what cannot work: the three stop items while it is off, the item that
+The menu reads `config list --filter security` when it opens and greys out
+what cannot work: the three stop items while it is off, the item that
 turns it on while it is on. Only on an ANSWER — a gateway that is down or
 unreachable leaves them clickable, the way they were before the question
 was asked.
+
+**A stop can be a one-way door.** voltd ships
+`security.estop.require_otp_to_resume = true`, and with `security.otp`
+disabled it refuses `estop resume` — from here and from the CLI — so the
+deployment stays stopped. The same listing answers that too, and the stop's
+confirmation says it, naming both keys, before the stop is engaged. (Found
+by engaging one: the release answered "require_otp_to_resume=true but
+otp.enabled=false".)
 
 **`estop --level kill-all`** stops the deployment. Same rule for its
 confirmation. `domain-block` and `tool-freeze` need domain and tool
@@ -118,6 +126,8 @@ with nothing to fill it.
 - Turning the emergency stop on makes its state item answer with a state
   instead of with "disabled", and the three stop items are greyed out until
   it is on.
+- Engaging a stop that could not be released warns about it first, naming
+  `security.estop.require_otp_to_resume` and `security.otp.enabled`.
 - Nothing in the log contains a pairing code.
 - A connect after any rotate — ours or one typed on the gateway — lands on
   the panel signed in, not on its pairing form: the session this app hands

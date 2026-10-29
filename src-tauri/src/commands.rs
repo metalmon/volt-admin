@@ -163,6 +163,35 @@ pub async fn run_gateway_action<R: Runtime>(
     Ok(output)
 }
 
+/// What the card's menu needs before it is drawn: whether this gateway's
+/// emergency stop is enabled, and whether an engaged one could be released.
+///
+/// Best-effort by design — a gateway that is down or unreachable answers
+/// with an error and the menu greys out nothing.
+#[command]
+pub async fn gateway_security<R: Runtime>(
+    app: AppHandle<R>,
+    profile: Profile,
+    lang: Option<String>,
+) -> Result<crate::actions::SecurityFlags, String> {
+    let lang = Lang::from_code(lang.as_deref());
+    let embedded = app
+        .state::<Registry>()
+        .peek(&profile.id, &profile.connection_fingerprint())
+        .await
+        .is_some_and(|h: Held| h.embedded);
+    let listing = crate::actions::run(
+        &profile,
+        crate::actions::GatewayAction::SecurityConfig,
+        false,
+        None,
+        embedded,
+        lang,
+    )
+    .await?;
+    Ok(crate::actions::security_flags(&listing))
+}
+
 /// Open another window on the Connect screen. The app is one process with
 /// several windows now (see `crate::windows`), so this is how a second
 /// connection is started without launching the exe again.

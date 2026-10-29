@@ -190,7 +190,9 @@ export default function Connect() {
    *  "Emergency stop is disabled" and only the one that enables it does
    *  anything. `undefined` = not asked yet or the ask failed — nothing is
    *  greyed out on a guess. */
-  const [estopOn, setEstopOn] = useState<Record<string, boolean>>({})
+  const [security, setSecurity] = useState<
+    Record<string, { estopEnabled: boolean; canResume: boolean }>
+  >({})
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -317,15 +319,13 @@ export default function Connect() {
    *  answer unknown and the items clickable, which is how they behaved
    *  before this existed. */
   const probeEstop = async (profile: Profile) => {
-    if (profile.id in estopOn) return
+    if (profile.id in security) return
     try {
-      const text = await invoke<string>('run_gateway_action', {
-        profile,
-        action: 'emergencyEnabled',
-        confirmed: false,
-        lang,
-      })
-      setEstopOn((m) => ({ ...m, [profile.id]: text.trim().toLowerCase().startsWith('true') }))
+      const flags = await invoke<{ estopEnabled: boolean; canResume: boolean }>(
+        'gateway_security',
+        { profile, lang },
+      )
+      setSecurity((m) => ({ ...m, [profile.id]: flags }))
     } catch {
       /* unknown stays unknown */
     }
@@ -349,7 +349,11 @@ export default function Connect() {
       })
       setError(null)
       setActionResult({ label, text })
-      if (action === 'emergencyEnable') setEstopOn((m) => ({ ...m, [profile.id]: true }))
+      if (action === 'emergencyEnable')
+        setSecurity((m) => ({
+          ...m,
+          [profile.id]: { canResume: m[profile.id]?.canResume ?? true, estopEnabled: true },
+        }))
     } catch (e) {
       // NOT the error banner: that feeds the sticky "last error" the
       // diagnostics paste carries, and a failing command's message is built
@@ -544,8 +548,8 @@ export default function Connect() {
                         {gatewayActions.map((a) => {
                           // Greyed only on a KNOWN answer: `undefined` means
                           // the gateway was not asked, or could not answer.
-                          const off = a.needs === 'on' && estopOn[p.id] === false
-                          const already = a.needs === 'off' && estopOn[p.id] === true
+                          const off = a.needs === 'on' && security[p.id]?.estopEnabled === false
+                          const already = a.needs === 'off' && security[p.id]?.estopEnabled === true
                           return (
                           <DropdownMenuItem
                             key={a.action}
@@ -553,11 +557,21 @@ export default function Connect() {
                             title={off ? t('gw.estopOff') : already ? t('gw.estopAlready') : undefined}
                             onSelect={() => {
                               if (a.confirm) {
+                                // A stop that cannot be released is a
+                                // one-way door: voltd refuses `estop resume`
+                                // while a resume needs an OTP that is off.
+                                const trapped =
+                                  a.action === 'emergencyStop' &&
+                                  security[p.id]?.canResume === false
                                 setPendingAction({
                                   profile: p,
                                   action: a.action,
                                   label: t(a.label),
-                                  confirm: t(a.confirm),
+                                  confirm: trapped
+                                    ? `${t(a.confirm)}
+
+${t('gw.warn.noResume')}`
+                                    : t(a.confirm),
                                 })
                                 return
                               }
@@ -629,7 +643,7 @@ export default function Connect() {
         <Card className="gap-3 border-destructive/40 py-5">
           <CardContent className="flex flex-col gap-3 px-5">
             <h2 className="font-heading text-lg text-foreground">{pendingAction.label}</h2>
-            <p className="text-sm text-destructive">{pendingAction.confirm}</p>
+            <p className="whitespace-pre-line text-sm text-destructive">{pendingAction.confirm}</p>
             <p className="text-xs text-muted-foreground">{pendingAction.profile.name}</p>
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="outline" onClick={() => setPendingAction(null)}>
