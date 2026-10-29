@@ -38,6 +38,11 @@ fn next_label() -> String {
 
 /// Open a window on the app's own entry point — the Connect screen.
 ///
+/// EVERY window comes from here, the first one included: `tauri.conf.json`
+/// says `"create": false` so the config window is not built behind our
+/// back, which kept the two kinds of window subtly different — the config
+/// one never got a webview background, and flashed white on navigation.
+///
 /// Built from the SAME config as the first window, with only the label
 /// changed: hand-rolling the builder meant hand-rolling the URL too, and a
 /// window whose webview never loaded anything is just a white rectangle.
@@ -52,7 +57,18 @@ pub fn open_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindo
         .unwrap_or_default();
     config.label = next_label();
     config.title = LAUNCHER_TITLE.to_string();
-    let window = WebviewWindowBuilder::from_config(app, &config)?.build()?;
+    let window = WebviewWindowBuilder::from_config(app, &config)?
+        // The config's `backgroundColor` reaches the WINDOW layer only —
+        // `WebviewAttributes::from(&WindowConfig)` does not carry it — and
+        // the white flash when a page is replaced comes from the WEBVIEW
+        // layer. This sets both, at creation, which is the only time the
+        // webview takes it for the gap between documents.
+        .background_color(BACKGROUND_DARK)
+        .build()?;
+    // Created dark because the app and the panel are dark by default; a
+    // light system is corrected straight away, while the window is still
+    // empty.
+    paint_for_theme(&window);
     fit_to_screen(&window);
     Ok(window)
 }

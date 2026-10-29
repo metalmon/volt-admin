@@ -175,11 +175,9 @@ pub fn run() {
 
                 // Launcher identity in the title bar (RU brand «Вольт Админ»),
                 // overriding the conf default so it matches the connected title.
-                for window in app.webview_windows().values() {
-                    let _ = window.set_title(windows::LAUNCHER_TITLE);
-                    windows::paint_for_theme(window);
-                    windows::fit_to_screen(window);
-                }
+                // The first window, by the same path as every other one
+                // (`"create": false` in the config, see `crate::windows`).
+                windows::request_new_window(app.handle());
 
                 // The tray is what keeps the process alive once the last
                 // window is closed — which is the point: a connection, and
