@@ -301,11 +301,23 @@ pub async fn connect<R: Runtime>(
     // previous one is one step, and two overlapping connects would otherwise
     // release what the other just handed to the webview.
     let _connecting = registry.connect_lock().await;
+    // Phase 2 gives each window its own label; until then every connect
+    // comes from the one window the app has.
+    let window_label = "main".to_string();
 
     // Already connected to this profile (another holder, or the window
     // reconnecting): reuse it rather than opening a second tunnel.
     let mut tunnel_opt: Option<tunnel::Tunnel> = None;
-    let held = registry.hold(&profile.id, Holder::Window).await;
+    // The fingerprint refuses an entry whose profile has been edited since
+    // it was opened — same id, different destination.
+    let fingerprint = profile.connection_fingerprint();
+    let held = registry
+        .hold(
+            &profile.id,
+            &fingerprint,
+            Holder::Window(window_label.clone()),
+        )
+        .await;
     // Whether the connection is served by the built-in ssh client decides
     // how pairing reaches the far side — a reused one knows its own answer.
     let mut embedded = held.as_ref().is_some_and(|h: &Held| h.embedded);
@@ -391,12 +403,13 @@ pub async fn connect<R: Runtime>(
                 tunnel_opt,
                 local_port,
                 embedded,
-                Holder::Window,
+                &fingerprint,
+                Holder::Window(window_label.clone()),
             )
             .await;
     }
     let dropped = registry
-        .release_others(Holder::Window, &profile.id)
+        .release_others(Holder::Window(window_label.clone()), &profile.id)
         .await
         .len();
     logx::log(
@@ -480,7 +493,7 @@ pub async fn disconnect<R: Runtime>(
 ) -> Result<(), String> {
     // The window lets go of whatever it was showing; a connection nobody
     // else holds goes down with its ssh child (see `crate::registry`).
-    let dropped = registry.release_all(Holder::Window).await;
+    let dropped = registry.release_all_windows().await;
     logx::log(
         "disconnect",
         &format!("released {} connection(s)", dropped.len()),

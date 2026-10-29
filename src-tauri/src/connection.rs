@@ -132,6 +132,27 @@ impl Profile {
     /// `id` is not checked here either — an imported document legitimately
     /// arrives without one, and it is `save_profile` that must not store a
     /// profile it cannot address.
+    /// What makes two connections to this profile the same connection: the
+    /// things that decide WHERE the tunnel goes and HOW. A saved profile can
+    /// be edited while one of its connections is open, and reusing that
+    /// connection afterwards would send traffic — and a pairing code minted
+    /// for it — down a tunnel to the old host while the UI names the new
+    /// one. `crate::registry` refuses to reuse an entry whose fingerprint
+    /// has changed.
+    pub fn connection_fingerprint(&self) -> String {
+        format!(
+            "{:?}|{}|{}|{}|{}|{:?}|{}|{:?}",
+            self.mode,
+            self.host,
+            self.user,
+            self.port,
+            self.panel_port,
+            self.auth,
+            self.key_path.as_deref().unwrap_or(""),
+            self.local_port
+        )
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("name".into());
@@ -221,6 +242,62 @@ mod tests {
             principal: None,
             paircode_command: None,
         }
+    }
+
+    #[test]
+    fn the_fingerprint_changes_when_the_connection_would_go_elsewhere() {
+        let base = valid();
+        for changed in [
+            Profile {
+                host: "other.host".into(),
+                ..valid()
+            },
+            Profile {
+                port: 2200,
+                ..valid()
+            },
+            Profile {
+                panel_port: 42618,
+                ..valid()
+            },
+            Profile {
+                user: "root".into(),
+                ..valid()
+            },
+            Profile {
+                mode: ConnMode::Local,
+                ..valid()
+            },
+            Profile {
+                auth: AuthMethod::Agent,
+                key_path: Some("/k".into()),
+                ..valid()
+            },
+            Profile {
+                local_port: Some(8081),
+                ..valid()
+            },
+        ] {
+            assert_ne!(
+                base.connection_fingerprint(),
+                changed.connection_fingerprint(),
+                "{changed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_ignores_what_does_not_change_the_connection() {
+        let renamed = Profile {
+            name: "Another name".into(),
+            principal: Some("ops".into()),
+            paircode_command: Some("echo hi".into()),
+            ..valid()
+        };
+        assert_eq!(
+            valid().connection_fingerprint(),
+            renamed.connection_fingerprint()
+        );
     }
 
     #[test]

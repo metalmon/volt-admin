@@ -26,10 +26,12 @@ use tokio::sync::Mutex;
 use crate::tunnel::Tunnel;
 
 /// Who wants a connection to stay up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Holder {
-    /// A window is showing this profile's panel.
-    Window,
+    /// A window is showing this profile's panel, named by its Tauri label:
+    /// two windows on one profile are two holds, and closing one must not
+    /// take the panel away from the other.
+    Window(String),
     /// A watcher is polling this profile's gateway. Nothing sets this yet —
     /// it exists so the lifetime rule is written once, in one place, which
     /// is also why the compiler is told not to mind.
@@ -60,6 +62,10 @@ pub struct Connection {
     /// Carried so a REUSED connection still reports how it is served:
     /// pairing and the admin-token read branch on it.
     embedded: bool,
+    /// [`crate::connection::Profile::connection_fingerprint`] as it was when
+    /// this connection was opened. A profile edited since then is a
+    /// different connection, however the same its id.
+    fingerprint: String,
     holders: HashSet<Holder>,
     /// Test-only payload, so a test can prove a `Connection` really was
     /// dropped without building a `Tunnel` (which would spawn `ssh`).
@@ -81,9 +87,14 @@ impl Registry {
     /// Add `holder` to an existing connection and return where its panel
     /// answers. `None` means there is no connection for `profile_id` yet and
     /// the caller has to open one.
-    pub async fn hold(&self, profile_id: &str, holder: Holder) -> Option<Held> {
+    pub async fn hold(&self, profile_id: &str, fingerprint: &str, holder: Holder) -> Option<Held> {
         let mut map = self.0.lock().await;
         let conn = map.get_mut(profile_id)?;
+        if conn.fingerprint != fingerprint {
+            // The profile was edited while this connection was open: it
+            // would send traffic to the old host under the new host's name.
+            return None;
+        }
         conn.holders.insert(holder);
         Some(Held {
             local_port: conn.local_port,
@@ -108,6 +119,7 @@ impl Registry {
         tunnel: Option<Tunnel>,
         local_port: u16,
         embedded: bool,
+        fingerprint: &str,
         holder: Holder,
     ) {
         let mut map = self.0.lock().await;
@@ -122,6 +134,7 @@ impl Registry {
                 tunnel,
                 local_port,
                 embedded,
+                fingerprint: fingerprint.to_string(),
                 holders,
                 #[cfg(test)]
                 probe: None,
@@ -148,27 +161,36 @@ impl Registry {
         false
     }
 
-    /// [`Self::release`] for every profile. Returns the ids whose connection
-    /// was dropped.
-    pub async fn release_all(&self, holder: Holder) -> Vec<String> {
-        self.release_where(holder, |_| true).await
+    /// Release every window's hold, whichever window. A `Monitor` hold keeps
+    /// its connection alive.
+    pub async fn release_all_windows(&self) -> Vec<String> {
+        self.release_matching(|h| matches!(h, Holder::Window(_)), |_| true)
+            .await
     }
 
     /// [`Self::release_all`], except for `keep` — how a window moving from
     /// one profile to another lets go of the first without touching the one
     /// it just arrived at.
     pub async fn release_others(&self, holder: Holder, keep: &str) -> Vec<String> {
-        self.release_where(holder, |id| id != keep).await
+        let keep = keep.to_string();
+        self.release_matching(move |h| *h == holder, move |id| id != keep)
+            .await
     }
 
-    async fn release_where(&self, holder: Holder, which: impl Fn(&str) -> bool) -> Vec<String> {
+    /// Drop every holder matching `holder_matches` from every connection
+    /// matching `which`, and remove the connections left with none.
+    async fn release_matching(
+        &self,
+        holder_matches: impl Fn(&Holder) -> bool,
+        which: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
         let mut map = self.0.lock().await;
         let mut dropped = Vec::new();
         map.retain(|id, conn| {
             if !which(id) {
                 return true;
             }
-            conn.holders.remove(&holder);
+            conn.holders.retain(|h| !holder_matches(h));
             if conn.holders.is_empty() {
                 dropped.push(id.clone());
                 return false;
@@ -195,6 +217,7 @@ impl Registry {
                 tunnel: None,
                 local_port,
                 embedded: false,
+                fingerprint: String::new(),
                 holders: HashSet::from([holder]),
                 probe: Some(probe),
             },
@@ -221,10 +244,14 @@ mod tests {
 
     /// Every test publishes `tunnel: None`, so none of them spawns `ssh`:
     /// the holder rules are what is under test, not the tunnel.
+    fn window(label: &str) -> Holder {
+        Holder::Window(label.to_string())
+    }
+
     async fn registry_with(ids: &[&str]) -> Registry {
         let r = Registry::default();
         for (i, id) in ids.iter().enumerate() {
-            r.publish(id, None, 9000 + i as u16, false, Holder::Window)
+            r.publish(id, None, 9000 + i as u16, false, "fp", window("w1"))
                 .await;
         }
         r
@@ -233,14 +260,16 @@ mod tests {
     #[tokio::test]
     async fn hold_on_an_unknown_profile_is_none() {
         let r = Registry::default();
-        assert!(r.hold("nope", Holder::Window).await.is_none());
+        assert!(r.hold("nope", "fp", window("w1")).await.is_none());
     }
 
     #[tokio::test]
     async fn publish_then_hold_returns_the_local_port() {
         let r = registry_with(&["a"]).await;
         assert_eq!(
-            r.hold("a", Holder::Monitor).await.map(|h| h.local_port),
+            r.hold("a", "fp", Holder::Monitor)
+                .await
+                .map(|h| h.local_port),
             Some(9000)
         );
         assert_eq!(r.local_port("a").await, Some(9000));
@@ -249,8 +278,8 @@ mod tests {
     #[tokio::test]
     async fn two_holders_keep_the_connection_until_both_let_go() {
         let r = registry_with(&["a"]).await;
-        r.hold("a", Holder::Monitor).await;
-        assert!(!r.release("a", Holder::Window).await, "monitor still holds");
+        r.hold("a", "fp", Holder::Monitor).await;
+        assert!(!r.release("a", window("w1")).await, "monitor still holds");
         assert_eq!(r.len().await, 1);
         assert!(r.release("a", Holder::Monitor).await, "last holder");
         assert_eq!(r.len().await, 0);
@@ -259,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn release_drops_the_connection_when_it_was_the_last_holder() {
         let r = registry_with(&["a"]).await;
-        assert!(r.release("a", Holder::Window).await);
+        assert!(r.release("a", window("w1")).await);
         assert_eq!(r.local_port("a").await, None);
     }
 
@@ -268,13 +297,13 @@ mod tests {
         let r = registry_with(&["a"]).await;
         assert!(!r.release("a", Holder::Monitor).await, "was never held");
         assert_eq!(r.len().await, 1, "and the connection stays");
-        assert!(!r.release("ghost", Holder::Window).await, "no such profile");
+        assert!(!r.release("ghost", window("w1")).await, "no such profile");
     }
 
     #[tokio::test]
-    async fn release_all_reports_every_id_it_dropped() {
+    async fn release_all_windows_reports_every_id_it_dropped() {
         let r = registry_with(&["a", "b"]).await;
-        let mut dropped = r.release_all(Holder::Window).await;
+        let mut dropped = r.release_all_windows().await;
         dropped.sort();
         assert_eq!(dropped, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(r.len().await, 0);
@@ -283,9 +312,61 @@ mod tests {
     #[tokio::test]
     async fn release_others_keeps_the_named_profile() {
         let r = registry_with(&["a", "b"]).await;
-        let dropped = r.release_others(Holder::Window, "b").await;
+        let dropped = r.release_others(window("w1"), "b").await;
         assert_eq!(dropped, vec!["a".to_string()]);
         assert_eq!(r.local_port("b").await, Some(9001));
+    }
+
+    #[tokio::test]
+    async fn two_windows_on_one_profile_both_have_to_let_go() {
+        let r = registry_with(&["a"]).await;
+        r.hold("a", "fp", window("w2")).await;
+        assert!(!r.release("a", window("w1")).await, "w2 still has it");
+        assert!(r.release("a", window("w2")).await, "last window");
+        assert_eq!(r.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn releasing_one_window_leaves_another_windows_profile_alone() {
+        let r = Registry::default();
+        r.publish("a", None, 9000, false, "fp", window("w1")).await;
+        r.publish("b", None, 9001, false, "fp", window("w2")).await;
+        assert!(r.release("a", window("w1")).await);
+        assert_eq!(r.local_port("b").await, Some(9001), "w2 untouched");
+    }
+
+    #[tokio::test]
+    async fn release_others_is_scoped_to_one_window() {
+        let r = Registry::default();
+        r.publish("a", None, 9000, false, "fp", window("w1")).await;
+        r.publish("b", None, 9001, false, "fp", window("w1")).await;
+        r.hold("b", "fp", window("w2")).await;
+        let dropped = r.release_others(window("w1"), "b").await;
+        assert_eq!(dropped, vec!["a".to_string()]);
+        assert_eq!(r.local_port("b").await, Some(9001), "w2 still holds b");
+    }
+
+    #[tokio::test]
+    async fn release_all_windows_leaves_a_monitor_hold() {
+        let r = Registry::default();
+        r.publish("a", None, 9000, false, "fp", window("w1")).await;
+        r.hold("a", "fp", Holder::Monitor).await;
+        r.publish("b", None, 9001, false, "fp", window("w2")).await;
+        let mut dropped = r.release_all_windows().await;
+        dropped.sort();
+        assert_eq!(dropped, vec!["b".to_string()], "only b had no other holder");
+        assert_eq!(r.local_port("a").await, Some(9000), "the monitor keeps a");
+    }
+
+    #[tokio::test]
+    async fn a_profile_edited_since_the_connection_opened_is_not_reused() {
+        // Same id, different host: reusing would send traffic — and a
+        // pairing code minted for it — to the old host under the new name.
+        let r = Registry::default();
+        r.publish("a", None, 9000, false, "old-host", window("w1"))
+            .await;
+        assert!(r.hold("a", "new-host", window("w2")).await.is_none());
+        assert!(r.hold("a", "old-host", window("w2")).await.is_some());
     }
 
     #[tokio::test]
@@ -293,10 +374,10 @@ mod tests {
         // A watcher holding a connection must survive the window connecting
         // to the same profile, or phase 3 kills its own tunnel.
         let r = registry_with(&["a"]).await;
-        r.hold("a", Holder::Monitor).await;
-        r.publish("a", None, 9100, false, Holder::Window).await;
+        r.hold("a", "fp", Holder::Monitor).await;
+        r.publish("a", None, 9100, false, "fp", window("w1")).await;
         assert!(
-            !r.release("a", Holder::Window).await,
+            !r.release("a", window("w1")).await,
             "the monitor hold must still be there"
         );
         assert_eq!(r.len().await, 1);
@@ -308,8 +389,8 @@ mod tests {
         // (`crate::pair`); a reused connection must not look like a system
         // ssh when it is the built-in client.
         let r = Registry::default();
-        r.publish("a", None, 9000, true, Holder::Window).await;
-        let held = r.hold("a", Holder::Window).await.expect("held");
+        r.publish("a", None, 9000, true, "fp", window("w1")).await;
+        let held = r.hold("a", "fp", window("w1")).await.expect("held");
         assert_eq!(held.local_port, 9000);
         assert!(held.embedded, "the flag must survive the reuse path");
     }
@@ -352,7 +433,7 @@ mod tests {
         let registry = Registry::default();
         for (i, payload) in payloads.into_iter().enumerate() {
             registry
-                .publish_with_probe(&format!("p{i}"), 9000 + i as u16, Holder::Window, payload)
+                .publish_with_probe(&format!("p{i}"), 9000 + i as u16, window("w1"), payload)
                 .await;
         }
         assert_eq!(registry.len().await, 3);
@@ -366,7 +447,7 @@ mod tests {
     #[tokio::test]
     async fn publish_twice_for_one_id_leaves_one_entry() {
         let r = registry_with(&["a"]).await;
-        r.publish("a", None, 9100, false, Holder::Window).await;
+        r.publish("a", None, 9100, false, "fp", window("w1")).await;
         assert_eq!(r.len().await, 1);
         assert_eq!(r.local_port("a").await, Some(9100), "the newer one wins");
     }
