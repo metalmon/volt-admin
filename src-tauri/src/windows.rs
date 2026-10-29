@@ -136,9 +136,14 @@ pub fn hide_as_closed<R: Runtime>(window: &WebviewWindow<R>) {
     });
 }
 
-/// The page's own background, so the native surface does not flash white
-/// before the first paint. Kept beside the tokens it mirrors:
-/// `--color-background` in `src/index.css`, light and `.dark`.
+/// The page's own background, mirroring `--color-background` in
+/// `src/index.css` (light and `.dark`).
+///
+/// The colour every window is CREATED with lives in `tauri.conf.json`
+/// (`backgroundColor`), because setting it afterwards leaves the webview
+/// layer white between documents — which is what pressing «Подключить»
+/// looked like: the launcher page left and the panel arrived through a
+/// white flash. These two are for correcting a light system afterwards.
 const BACKGROUND_LIGHT: tauri::window::Color = tauri::window::Color(0xf5, 0xf2, 0xee, 0xff);
 const BACKGROUND_DARK: tauri::window::Color = tauri::window::Color(0x1b, 0x1e, 0x1f, 0xff);
 

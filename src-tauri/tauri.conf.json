@@ -14,6 +14,7 @@
     "windows": [
       {
         "title": "Volt Admin",
+        "backgroundColor": "#1b1e1f",
         "width": 1180,
         "height": 1000,
         "minWidth": 900,
