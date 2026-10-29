@@ -167,7 +167,7 @@ fn local_voltd_binary() -> Option<String> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from);
-    local_config_dirs(|var| std::env::var_os(var), home)
+    binary_search_dirs(|var| std::env::var_os(var), home)
         .iter()
         .flat_map(|dir| {
             BINARY_NAMES
@@ -176,6 +176,30 @@ fn local_voltd_binary() -> Option<String> {
         })
         .find(|path| path.is_file())
         .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// Where it is acceptable to look for an executable to RUN: the directories
+/// this user owns — their own environment and their own home.
+///
+/// Not the container path from [`CONFIG_DIRS`]. That one is right for the
+/// command that runs INSIDE the kit's container, and for finding a token
+/// file, but on a shared Linux box `/voltd-data` is a directory anybody
+/// could have created, and a planted `bin/voltd` there would run as whoever
+/// opened the app.
+fn binary_search_dirs(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    home: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    CONFIG_DIRS
+        .iter()
+        .filter_map(|d| match d {
+            ConfigDir::Env(var) => env(var)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+            ConfigDir::Home(suffix) => home.as_ref().map(|h| h.join(suffix)),
+            ConfigDir::Absolute(_) => None,
+        })
+        .collect()
 }
 
 /// First `name` on `PATH`, as the OS would resolve it.
@@ -631,6 +655,24 @@ mod tests {
         );
         // An unset variable contributes nothing rather than an empty path.
         assert_eq!(local.len(), 4, "{shown:?}");
+    }
+
+    #[test]
+    fn a_binary_is_never_looked_for_in_the_container_path() {
+        // Reading a token from a fixed path is one thing; running an
+        // executable found there is another — see `binary_search_dirs`.
+        let dirs = binary_search_dirs(|_| None, Some(std::path::PathBuf::from("/home/u")));
+        let shown: Vec<String> = dirs.iter().map(|p| p.display().to_string()).collect();
+        assert!(!shown.iter().any(|p| p.contains("voltd-data")), "{shown:?}");
+        assert!(shown.iter().any(|p| p.ends_with(".voltd")), "{shown:?}");
+        // The token lookup still covers it.
+        let token_dirs = local_config_dirs(|_| None, Some(std::path::PathBuf::from("/home/u")));
+        assert!(
+            token_dirs
+                .iter()
+                .any(|p| p.display().to_string().contains("voltd-data")),
+            "{token_dirs:?}"
+        );
     }
 
     #[test]
