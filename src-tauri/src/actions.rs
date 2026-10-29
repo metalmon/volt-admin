@@ -1,9 +1,8 @@
 //! Things an administrator does to a gateway from the launcher, instead of
 //! opening a terminal and remembering where `voltd` lives.
 //!
-//! Three of them, chosen in `docs/specs/gateway-actions.md`: re-issue the
-//! pairing code, restart the gateway, and the emergency stop (engage,
-//! inspect, release). They run exactly where pairing runs — this machine
+//! Chosen in `docs/specs/gateway-actions.md`: revoke every pairing, and
+//! the emergency stop (enable, engage, inspect, release). They run exactly where pairing runs — this machine
 //! for a `Local` profile, the SSH target for a `Remote` one.
 //!
 //! NOTHING HERE LOGS THE OUTPUT. `get-paircode --rotate` prints a pairing
@@ -28,8 +27,6 @@ const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 pub enum GatewayAction {
     /// Revoke every paired token and issue a fresh code.
     RotatePairing,
-    /// Restart the HTTP/WebSocket gateway, not the daemon.
-    RestartGateway,
     /// Is the emergency stop enabled at all? Asked before the menu is
     /// drawn, so its three items can be greyed out instead of all
     /// answering "Emergency stop is disabled".
@@ -51,7 +48,6 @@ impl GatewayAction {
     pub fn args(self) -> &'static str {
         match self {
             Self::RotatePairing => "gateway get-paircode --rotate",
-            Self::RestartGateway => "gateway restart",
             Self::EmergencyEnabled => "config get security.estop.enabled",
             Self::EmergencyEnable => "config set security.estop.enabled true",
             Self::EmergencyStop => "estop --level kill-all",
@@ -147,7 +143,7 @@ pub async fn run(
     // A failing command still prints, and `collect_output` puts that print
     // into the error. For an action whose print is a secret, the error is
     // replaced rather than passed on.
-    result.map_err(|e| explained(safe_error(action, e, lang), lang))
+    result.map_err(|e| safe_error(action, e, lang))
 }
 
 /// The error a caller may see. A failing command still prints, and
@@ -163,28 +159,6 @@ fn safe_error(action: GatewayAction, e: String, lang: Lang) -> String {
         Lang::Ru => "команда не выполнена; подробности — в выводе на шлюзе".to_string(),
         Lang::En => "the command failed; its output stays on the gateway".to_string(),
     }
-}
-
-/// voltd's refusals, in words that say what to do about them. The text the
-/// command printed stays first — it is the evidence — and the explanation
-/// follows it.
-fn explained(e: String, lang: Lang) -> String {
-    // `gateway restart` wants the config lifecycle, which the running
-    // daemon holds. That daemon is what serves the panel, so this is the
-    // answer on every machine the launcher is useful on, and "exit code: 1"
-    // alone tells the administrator nothing.
-    if !e.contains("lifecycle is already owned") {
-        return e;
-    }
-    let hint = match lang {
-        Lang::Ru => "Шлюз уже запущен демоном или службой Volt — из CLI его не перезапустить. Перезапустите службу Volt, либо примените конфигурацию из самой панели.",
-        Lang::En => "The gateway is already run by the Volt daemon or service — the CLI cannot restart it. Restart the Volt service, or apply the config from the panel itself.",
-    };
-    format!(
-        "{e}
-
-{hint}"
-    )
 }
 
 #[cfg(test)]
@@ -215,7 +189,6 @@ mod tests {
             GatewayAction::RotatePairing.args(),
             "gateway get-paircode --rotate"
         );
-        assert_eq!(GatewayAction::RestartGateway.args(), "gateway restart");
         assert_eq!(
             GatewayAction::EmergencyEnable.args(),
             "config set security.estop.enabled true"
@@ -238,25 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn an_owned_config_lifecycle_says_who_owns_it() {
-        // What a restart answers on every machine where voltd runs as a
-        // daemon or a service — which is every machine that is serving the
-        // panel we just connected to. The text voltd printed stays; the
-        // sentence after it is what to do about it.
-        let printed =
-            "exit code: 1: Error: config lifecycle is already owned at /x/config-lifecycle.lock"
-                .to_string();
-        let out = explained(printed.clone(), Lang::Ru);
-        assert!(out.starts_with(&printed), "{out}");
-        assert!(out.contains("служб"), "{out}");
-        // Anything else is handed back untouched.
-        assert_eq!(
-            explained("exit code: 1: no such file".into(), Lang::Ru),
-            "exit code: 1: no such file"
-        );
-    }
-
-    #[test]
     fn a_failing_rotate_does_not_hand_back_what_it_printed() {
         // Tested on the MAPPING, never by running the command: a rotate
         // revokes every paired token, and a test that runs it revokes them
@@ -268,7 +222,7 @@ mod tests {
             "{hidden}"
         );
         // Everything else keeps its reason — that is what makes it useful.
-        let kept = safe_error(GatewayAction::RestartGateway, printed.clone(), Lang::En);
+        let kept = safe_error(GatewayAction::EmergencyStatus, printed.clone(), Lang::En);
         assert_eq!(kept, printed);
     }
 
@@ -276,7 +230,6 @@ mod tests {
     fn only_the_rotate_prints_a_secret() {
         assert!(GatewayAction::RotatePairing.prints_secret());
         for action in [
-            GatewayAction::RestartGateway,
             GatewayAction::EmergencyEnabled,
             GatewayAction::EmergencyEnable,
             GatewayAction::EmergencyStop,
@@ -294,7 +247,7 @@ mod tests {
             "revokes every token"
         );
         assert!(GatewayAction::EmergencyStop.confirms(), "stops everything");
-        assert!(!GatewayAction::RestartGateway.confirms());
+        assert!(!GatewayAction::EmergencyStatus.confirms());
         assert!(!GatewayAction::EmergencyStatus.confirms());
         assert!(!GatewayAction::EmergencyResume.confirms());
     }
@@ -313,7 +266,7 @@ mod tests {
             assert!(confirmation_missing(action, true, Lang::En).is_none());
         }
         for action in [
-            GatewayAction::RestartGateway,
+            GatewayAction::EmergencyStatus,
             GatewayAction::EmergencyStatus,
             GatewayAction::EmergencyResume,
         ] {
@@ -326,8 +279,8 @@ mod tests {
 
     #[test]
     fn a_remote_command_line_is_the_bare_binary_and_the_args() {
-        let line = command_line(&profile(ConnMode::Remote), GatewayAction::RestartGateway);
-        assert_eq!(line, "voltd gateway restart");
+        let line = command_line(&profile(ConnMode::Remote), GatewayAction::EmergencyResume);
+        assert_eq!(line, "voltd estop resume");
     }
 
     #[test]

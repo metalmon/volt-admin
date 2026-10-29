@@ -96,7 +96,6 @@ const importFieldLabelKey: Record<string, string> = {
  *  the rule (see `src-tauri/src/actions.rs`). */
 const gatewayActions = [
   { action: 'rotatePairing', label: 'gw.rotate', confirm: 'gw.confirm.rotate', needs: null },
-  { action: 'restartGateway', label: 'gw.restart', confirm: null, needs: null },
   { action: 'emergencyEnable', label: 'gw.estopEnable', confirm: null, needs: 'off' },
   { action: 'emergencyStop', label: 'gw.estop', confirm: 'gw.confirm.estop', needs: 'on' },
   { action: 'emergencyStatus', label: 'gw.estopStatus', confirm: null, needs: 'on' },

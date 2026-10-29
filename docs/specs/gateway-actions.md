@@ -19,7 +19,6 @@ Chosen over a general "run a command on the gateway" (see Out of scope):
 | action | command | confirm |
 |---|---|---|
 | Revoke all pairings | `gateway get-paircode --rotate` | yes, naming what breaks |
-| Restart the gateway | `gateway restart` | no |
 | Turn the emergency stop on | `config set security.estop.enabled true` | no |
 | Emergency stop | `estop --level kill-all` | yes, naming what stops |
 | Emergency stop — state | `estop status` | no |
@@ -91,6 +90,15 @@ with nothing to fill it.
 - An arbitrary command box. The profile already carries one executable
   field (`paircodeCommand`), and the import preview shows it precisely
   because running what someone else typed is a decision, not a convenience.
+- `gateway restart`. It was in the menu until a live test: it answers
+  "config lifecycle is already owned" whenever a daemon or service holds the
+  gateway — which is every gateway the launcher is pointed at, since that
+  daemon is what serves the panel. The panel's own reload button works
+  because the DAEMON reloads itself: it owns the config lifecycle. An
+  outside process has to take that lock, and the owner does not give it up.
+  Doing what the panel does would mean calling the daemon's own HTTP route,
+  i.e. duplicating a button in the window the launcher has just opened.
+  (`voltd config set` needs no such lock, so the estop items are unaffected.)
 - `service start/stop/restart`. On a `Remote` profile the SSH lands inside
   the deployment that would be stopped — including its sshd. One click,
   no way back.
@@ -101,8 +109,6 @@ with nothing to fill it.
 
 - Rotating from the menu shows the new code, and the next connect to that
   profile pairs again by itself rather than opening a pairing form.
-- Restarting a gateway whose panel had stopped answering makes it answer,
-  without touching the daemon.
 - An emergency stop asks a question that names what stops, and its state
   and release are one item each. On a gateway where `[security.estop]` is
   not enabled, the item says so in voltd's own words — it names the setting
@@ -112,11 +118,6 @@ with nothing to fill it.
 - Turning the emergency stop on makes its state item answer with a state
   instead of with "disabled", and the three stop items are greyed out until
   it is on.
-- A restart refused with "config lifecycle is already owned" says, under
-  voltd's own text, that a daemon or service is holding the gateway and
-  names what to do instead. `voltd gateway restart` can only restart a
-  gateway the CLI itself started; anything the launcher connects to in a
-  real deployment is held by the daemon.
 - Nothing in the log contains a pairing code.
 - A connect after any rotate — ours or one typed on the gateway — lands on
   the panel signed in, not on its pairing form: the session this app hands
