@@ -277,6 +277,9 @@ pub fn save_profile(app: AppHandle, profile: Profile) -> Result<(), String> {
 /// Delete a connection profile by `id`.
 #[command]
 pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
+    // Its pairing marker goes too, or re-creating the profile later would
+    // look already paired to a gateway that has forgotten this app.
+    crate::settings::forget_paired(&app, &id);
     let mut profiles = load_profiles(&app)?;
     profiles.retain(|p| p.id != id);
     persist_profiles(&app, &profiles)
@@ -494,23 +497,40 @@ pub async fn connect<R: Runtime>(
     // server rather than from the webview's idea of one. Best effort — a
     // failure leaves `session_token` empty and the page-driven fallback
     // (probe, then mint on demand) takes over.
-    let session_token = match pair::mint_code(&profile, password.as_deref(), embedded, lang).await {
-        Ok(code) => match pair::origin_of(&base_url) {
-            Some(origin) => match pair::redeem_code(&origin, &code).await {
-                Ok(token) => {
-                    logx::log("connect", "paired up front");
-                    Some(token)
-                }
-                Err(reason) => {
-                    logx::log("connect", &format!("redeem failed: {reason}"));
-                    None
-                }
+    //
+    // Only ONCE per gateway, though: every redeem adds a hash to the
+    // gateway's `[gateway] paired_tokens` and a row to its device list, and
+    // the panel keeps its own session in the webview's storage afterwards.
+    // If that session is ever gone, the page-driven fallback mints one on
+    // demand — which is the whole reason that path stays.
+    let remembered = crate::settings::paired_fingerprint(&app, &profile.id);
+    let session_token = if !crate::settings::needs_pairing(remembered.as_deref(), &fingerprint) {
+        logx::log("connect", "already paired with this gateway");
+        None
+    } else {
+        match pair::mint_code(&profile, password.as_deref(), embedded, lang).await {
+            Ok(code) => match pair::origin_of(&base_url) {
+                Some(origin) => match pair::redeem_code(&origin, &code).await {
+                    Ok(token) => {
+                        logx::log("connect", "paired up front");
+                        if let Err(e) =
+                            crate::settings::remember_paired(&app, &profile.id, &fingerprint)
+                        {
+                            logx::log("connect", &format!("could not remember pairing: {e}"));
+                        }
+                        Some(token)
+                    }
+                    Err(reason) => {
+                        logx::log("connect", &format!("redeem failed: {reason}"));
+                        None
+                    }
+                },
+                None => None,
             },
-            None => None,
-        },
-        Err(reason) => {
-            logx::log("connect", &format!("mint up front failed: {reason}"));
-            None
+            Err(reason) => {
+                logx::log("connect", &format!("mint up front failed: {reason}"));
+                None
+            }
         }
     };
 

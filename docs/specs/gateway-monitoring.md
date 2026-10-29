@@ -77,10 +77,16 @@ successful redeem adds a token hash to the gateway's `[gateway]
 paired_tokens`. Connecting daily grows that list, and the panel's device
 list, without bound.
 
-So storing the session token per profile is not a cost this feature
-introduces — it is a fix the app already needs. `connect` should pair only
-when it has no token for the profile, or when the one it has stops being
-accepted (`401`).
+That is fixed WITHOUT storing a token: the app remembers, per profile, the
+`connection_fingerprint` of the gateway it already paired with, and pairs
+up front only when that is missing or names somewhere else. The marker is
+not a secret — it says a pairing happened, not what it produced — and when
+the panel has genuinely lost its session the page-driven fallback still
+mints one on demand.
+
+So a STORED SESSION TOKEN is needed only if this feature is built: a
+watcher polls `/api/logs` with no window open, and has to present one
+itself. Dropping monitoring drops that requirement with it.
 
 ### Authentication, and the one new secret
 
