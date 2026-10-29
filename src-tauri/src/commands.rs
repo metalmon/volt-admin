@@ -108,12 +108,19 @@ pub fn set_language<R: Runtime>(app: AppHandle<R>, lang: String) -> Result<(), S
 /// Open another window on the Connect screen. The app is one process with
 /// several windows now (see `crate::windows`), so this is how a second
 /// connection is started without launching the exe again.
+/// ASYNC on purpose, and the work is QUEUED for the event loop.
+///
+/// A synchronous command is dispatched on the thread that runs the event
+/// loop, and building a WebView2 right there — inside the handling of the
+/// IPC message that asked for it — wedges the whole app: the window comes
+/// up blank and the UI stops answering. The same call from the tray menu
+/// has always worked, because a menu event is handled at the top of the
+/// loop rather than nested inside an IPC dispatch.
+///
+/// `async` puts this on the async runtime instead, so `run_on_main_thread`
+/// posts the work and the loop picks it up at a point where it is safe.
 #[command]
-pub fn new_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    // ON THE MAIN THREAD. A command runs on a worker thread, and a webview
-    // built there came up as a blank white window on Windows — the same
-    // call from the tray menu, which the event loop runs, has always
-    // worked. That difference is the whole bug.
+pub async fn new_window<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let handle = app.clone();
     app.run_on_main_thread(move || {
         if let Err(e) = crate::windows::open_window(&handle) {
