@@ -108,15 +108,44 @@ loop {
 ```
 
 - **Interval:** 60 s, one constant. `tokio::time::interval` with
-  `MissedTickBehavior::Delay`, so a laptop that slept does not fire a burst
-  of catch-up polls.
+  `MissedTickBehavior::Delay`, so a laptop that slept fires ONE poll
+  instead of one per missed minute. This loses nothing: the events are on
+  the gateway, and forty identical requests return the same page. What the
+  gap actually costs is covered in §3a.
 - **Backoff:** on failure double from 60 s to a 5-minute ceiling, reset on
   the first success.
 - **`severity_min=13`** fetches warnings and errors in one request; only
   errors notify (§5). One request, both needs.
-- **`limit=50` and no paging.** If more than 50 events arrived in a minute,
-  the newest 50 are enough to tell someone something is wrong; the panel is
-  where you go to read the rest. Paging a backlog at 3am is not a feature.
+- **`limit=50` per page**, one page in steady state. Fifty new events
+  inside one minute already means "something is wrong"; the panel is where
+  the rest gets read.
+
+### 3a. Coming back after a gap
+
+The store lives on the gateway, so a laptop that slept lost nothing — but
+one page of 50 can no longer cover what piled up, and the newest 50 may all
+be the same noisy error while the one that matters sits behind them.
+
+So the watcher tracks the `@timestamp` of the newest event it has already
+processed (RFC 3339, sortable as a string — no parsing needed to compare).
+When a poll comes back **full** (`events.len() == limit`) and its oldest
+event is still newer than that mark, there is a backlog: keep paging
+backwards with `until_segment_cursor` + `until_line_offset` until one of
+
+- an event older than the mark appears (we have caught up),
+- `at_end` is true,
+- or **10 pages** have been read.
+
+Hitting the cap, or `incomplete: true` in any page, means the history is
+partial — the profile says so instead of pretending the list is complete.
+
+A catch-up never produces a notification per event. It produces one:
+"VoltSSH: 137 errors since 14:02, oldest: <text>". The detail is in the
+problem list, where it can be read sitting down.
+
+`daemon_started_at` changing during a gap is its own line in that
+notification: the gateway restarted while nobody was watching, and the
+events before the restart may be gone from the store entirely.
 
 ### 4. Pairing as a device, and where the token lives
 
@@ -224,6 +253,7 @@ If only two phases ever get built, 1 and 3 are the ones with value;
   separate monitor process.
 - The keychain as the default home for session tokens, with a file as the
   visible fallback.
-- 60 s, 50 events, no paging, warn-never-notifies. All four are guesses
-  about an administrator's tolerance, and all four are one constant each.
+- 60 s, 50 events a page, 10 pages of catch-up, warn-never-notifies. All
+  of them are guesses about an administrator's tolerance, and each is one
+  constant.
 - Clicking a notification opens a problem list rather than the panel.
