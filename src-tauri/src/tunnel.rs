@@ -638,10 +638,13 @@ pub async fn run_ssh_command(
                 "run_ssh_command elapsed_ms={} result=ok",
                 started.elapsed().as_millis()
             ),
-            Err(e) => format!(
-                "run_ssh_command elapsed_ms={} result=err: {}",
-                started.elapsed().as_millis(),
-                e.chars().take(160).collect::<String>()
+            // Not the error's text either: when the remote command exits
+            // non-zero, `collect_output` builds that text FROM its output,
+            // and one of our commands prints a pairing code. The caller
+            // shows it on screen; the log keeps the outcome.
+            Err(_) => format!(
+                "run_ssh_command elapsed_ms={} result=err",
+                started.elapsed().as_millis()
             ),
         },
     );

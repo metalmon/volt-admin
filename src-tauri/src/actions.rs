@@ -50,6 +50,16 @@ impl GatewayAction {
         }
     }
 
+    /// Does this action's OUTPUT carry a secret?
+    ///
+    /// A rotate prints a fresh pairing code. That belongs on the
+    /// administrator's screen and nowhere else — not in an error, which the
+    /// UI keeps as "the last error" and copies into the diagnostics people
+    /// send to support.
+    pub fn prints_secret(self) -> bool {
+        matches!(self, Self::RotatePairing)
+    }
+
     /// Does this need the user to agree to a consequence first?
     ///
     /// Only the two that take something away: a rotate makes every other
@@ -58,6 +68,18 @@ impl GatewayAction {
     pub fn confirms(self) -> bool {
         matches!(self, Self::RotatePairing | Self::EmergencyStop)
     }
+}
+
+/// Why this action may not run yet, if it may not.
+///
+/// Separate from [`run`] so the rule can be tested without a test ever
+/// calling `run` — one did, with a `Local` profile, and rotated the pairing
+/// tokens of the machine the suite was on.
+fn confirmation_missing(action: GatewayAction, confirmed: bool, lang: Lang) -> Option<String> {
+    (action.confirms() && !confirmed).then(|| match lang {
+        Lang::Ru => "действие требует подтверждения".to_string(),
+        Lang::En => "this action needs confirmation".to_string(),
+    })
 }
 
 /// The full command line for `action` on `p`'s gateway.
@@ -82,11 +104,8 @@ pub async fn run(
     // The confirmation is enforced HERE, not only drawn in the UI: a rotate
     // revokes every paired token and a stop stops the deployment, and
     // neither should be one stray call away.
-    if action.confirms() && !confirmed {
-        return Err(match lang {
-            Lang::Ru => "действие требует подтверждения".to_string(),
-            Lang::En => "this action needs confirmation".to_string(),
-        });
+    if let Some(refusal) = confirmation_missing(action, confirmed, lang) {
+        return Err(refusal);
     }
     let command = command_line(p, action);
     logx::log(
@@ -115,7 +134,25 @@ pub async fn run(
             if result.is_ok() { "ok" } else { "failed" }
         ),
     );
-    result
+    // A failing command still prints, and `collect_output` puts that print
+    // into the error. For an action whose print is a secret, the error is
+    // replaced rather than passed on.
+    result.map_err(|e| safe_error(action, e, lang))
+}
+
+/// The error a caller may see. A failing command still prints, and
+/// `collect_output` builds its error FROM that print — so for an action
+/// whose print is a secret, the error is replaced instead of passed on.
+/// Errors travel to the UI's "last error", and from there into the
+/// diagnostics people send to support.
+fn safe_error(action: GatewayAction, e: String, lang: Lang) -> String {
+    if !action.prints_secret() {
+        return e;
+    }
+    match lang {
+        Lang::Ru => "команда не выполнена; подробности — в выводе на шлюзе".to_string(),
+        Lang::En => "the command failed; its output stays on the gateway".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +193,35 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_rotate_does_not_hand_back_what_it_printed() {
+        // Tested on the MAPPING, never by running the command: a rotate
+        // revokes every paired token, and a test that runs it revokes them
+        // on whatever machine the suite happens to be on.
+        let printed = "PAIRCODE abcdefghijklmnopqrstuvwxyz123456".to_string();
+        let hidden = safe_error(GatewayAction::RotatePairing, printed.clone(), Lang::En);
+        assert!(
+            !hidden.contains("abcdefghijklmnopqrstuvwxyz123456"),
+            "{hidden}"
+        );
+        // Everything else keeps its reason — that is what makes it useful.
+        let kept = safe_error(GatewayAction::RestartGateway, printed.clone(), Lang::En);
+        assert_eq!(kept, printed);
+    }
+
+    #[test]
+    fn only_the_rotate_prints_a_secret() {
+        assert!(GatewayAction::RotatePairing.prints_secret());
+        for action in [
+            GatewayAction::RestartGateway,
+            GatewayAction::EmergencyStop,
+            GatewayAction::EmergencyStatus,
+            GatewayAction::EmergencyResume,
+        ] {
+            assert!(!action.prints_secret(), "{action:?}");
+        }
+    }
+
+    #[test]
     fn only_the_destructive_two_confirm() {
         assert!(
             GatewayAction::RotatePairing.confirms(),
@@ -167,22 +233,28 @@ mod tests {
         assert!(!GatewayAction::EmergencyResume.confirms());
     }
 
-    #[tokio::test]
-    async fn a_destructive_action_refuses_to_run_unconfirmed() {
+    #[test]
+    fn a_destructive_action_refuses_to_run_unconfirmed() {
         // Drawing the dialog is the UI's job; being impossible to skip is
-        // not. Nothing is spawned here: the refusal comes first.
+        // not. Tested on the rule, not by calling `run` — NO test in this
+        // file may reach a command line.
         for action in [GatewayAction::RotatePairing, GatewayAction::EmergencyStop] {
-            let err = run(
-                &profile(ConnMode::Local),
-                action,
-                false,
-                None,
-                false,
-                Lang::En,
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(err, "this action needs confirmation", "{action:?}");
+            assert_eq!(
+                confirmation_missing(action, false, Lang::En).as_deref(),
+                Some("this action needs confirmation"),
+                "{action:?}"
+            );
+            assert!(confirmation_missing(action, true, Lang::En).is_none());
+        }
+        for action in [
+            GatewayAction::RestartGateway,
+            GatewayAction::EmergencyStatus,
+            GatewayAction::EmergencyResume,
+        ] {
+            assert!(
+                confirmation_missing(action, false, Lang::En).is_none(),
+                "{action:?}"
+            );
         }
     }
 

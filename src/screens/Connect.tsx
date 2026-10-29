@@ -325,7 +325,10 @@ export default function Connect() {
       setError(null)
       setActionResult({ label, text })
     } catch (e) {
-      setError(t('gw.failed', { e: String(e) }))
+      // NOT the error banner: that feeds the sticky "last error" the
+      // diagnostics paste carries, and a failing command's message is built
+      // from what it printed. Shown here, read, closed.
+      setActionResult({ label, text: t('gw.failed', { e: String(e) }) })
     } finally {
       setActionBusy(false)
       setPendingAction(null)

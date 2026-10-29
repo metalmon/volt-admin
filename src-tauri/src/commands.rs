@@ -138,11 +138,7 @@ pub async fn run_gateway_action<R: Runtime>(
     // ssh of its own.
     let embedded = app
         .state::<Registry>()
-        .hold(
-            &profile.id,
-            &profile.connection_fingerprint(),
-            Holder::Window(String::new()),
-        )
+        .peek(&profile.id, &profile.connection_fingerprint())
         .await
         .is_some_and(|h: Held| h.embedded);
     let output = crate::actions::run(
