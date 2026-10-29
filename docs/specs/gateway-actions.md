@@ -1,4 +1,4 @@
-# Spec: three gateway actions in the launcher
+# Spec: gateway actions in the launcher
 
 **Status:** approved in scope, not implemented
 **Owner:** launcher (profile card menu, `crate::pair`'s exec path)
@@ -12,14 +12,15 @@ host, remembers where `voltd` lives, and types. The app already knows all
 three of those: it has the profile, it resolves the binary, and it runs
 commands there for pairing.
 
-## The three
+## The actions
 
 Chosen over a general "run a command on the gateway" (see Out of scope):
 
 | action | command | confirm |
 |---|---|---|
-| Re-issue the pairing code | `gateway get-paircode --rotate` | yes, naming what breaks |
+| Revoke all pairings | `gateway get-paircode --rotate` | yes, naming what breaks |
 | Restart the gateway | `gateway restart` | no |
+| Turn the emergency stop on | `config set security.estop.enabled true` | no |
 | Emergency stop | `estop --level kill-all` | yes, naming what stops |
 | Emergency stop — state | `estop status` | no |
 | Emergency stop — release | `estop resume` | no |
@@ -28,9 +29,17 @@ Chosen over a general "run a command on the gateway" (see Out of scope):
 diagnosis an administrator needs first is already in the app's own
 Diagnostics section.
 
-**`--rotate` revokes every paired token** and prints a fresh code. Every
+**`--rotate` revokes every paired token** and prints a fresh code. It is
+named for the revoking, not for the code: "re-issue the pairing code" reads
+like a convenience and this is not one. Every
 other client — phones, browsers, another admin's laptop — has to pair
 again. The confirmation says exactly that, not "are you sure".
+
+**The emergency stop ships disabled**, and until it is enabled all three of
+its items answer "Emergency stop is disabled. Enable [security.estop].enabled
+= true in config.toml" — which is why turning it on is an item too. Enabling
+takes nothing away, so it does not confirm; it writes one key and the gateway
+picks it up when it next reads its config.
 
 **`estop --level kill-all`** stops the deployment. Same rule for its
 confirmation. `domain-block` and `tool-freeze` need domain and tool
@@ -55,8 +64,8 @@ disabled with that reason, as auto-pairing already reports.
 ## The output
 
 Each action opens a result window with the command's text output,
-selectable and copyable. `doctor` was dropped, but the other three still
-have to be readable: `--rotate` PRINTS THE NEW CODE, which is the whole
+selectable and copyable. `doctor` was dropped, but what the rest print still
+has to be readable: `--rotate` PRINTS THE NEW CODE, which is the whole
 point of running it.
 
 **That output never reaches the log.** The log's rule stands — no codes, no
@@ -89,7 +98,16 @@ with nothing to fill it.
 - Restarting a gateway whose panel had stopped answering makes it answer,
   without touching the daemon.
 - An emergency stop asks a question that names what stops, and its state
-  and release are one item each.
+  and release are one item each. On a gateway where `[security.estop]` is
+  not enabled, the item says so in voltd's own words — it names the setting
+  to change — rather than appearing to do nothing.
 - A failed action shows what the command printed, starting with the line
   that says why — not its tail.
+- Turning the emergency stop on makes its state item answer with a state
+  instead of with "disabled".
 - Nothing in the log contains a pairing code.
+- A connect after any rotate — ours or one typed on the gateway — lands on
+  the panel signed in, not on its pairing form: the session this app hands
+  over REPLACES whatever the panel had, because a rotate leaves a dead token
+  in its storage and a panel that boots signed out also boots in its own
+  language.

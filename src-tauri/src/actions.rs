@@ -30,6 +30,10 @@ pub enum GatewayAction {
     RotatePairing,
     /// Restart the HTTP/WebSocket gateway, not the daemon.
     RestartGateway,
+    /// Turn the emergency stop ON in the gateway's config — it ships
+    /// disabled, and the other three answer "Emergency stop is disabled"
+    /// until it is.
+    EmergencyEnable,
     /// Stop the deployment.
     EmergencyStop,
     /// Is an emergency stop engaged, and at what level?
@@ -44,6 +48,7 @@ impl GatewayAction {
         match self {
             Self::RotatePairing => "gateway get-paircode --rotate",
             Self::RestartGateway => "gateway restart",
+            Self::EmergencyEnable => "config set security.estop.enabled true",
             Self::EmergencyStop => "estop --level kill-all",
             Self::EmergencyStatus => "estop status",
             Self::EmergencyResume => "estop resume",
@@ -185,6 +190,10 @@ mod tests {
         );
         assert_eq!(GatewayAction::RestartGateway.args(), "gateway restart");
         assert_eq!(
+            GatewayAction::EmergencyEnable.args(),
+            "config set security.estop.enabled true"
+        );
+        assert_eq!(
             GatewayAction::EmergencyStop.args(),
             "estop --level kill-all"
         );
@@ -213,6 +222,7 @@ mod tests {
         assert!(GatewayAction::RotatePairing.prints_secret());
         for action in [
             GatewayAction::RestartGateway,
+            GatewayAction::EmergencyEnable,
             GatewayAction::EmergencyStop,
             GatewayAction::EmergencyStatus,
             GatewayAction::EmergencyResume,

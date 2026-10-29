@@ -97,6 +97,7 @@ const importFieldLabelKey: Record<string, string> = {
 const gatewayActions = [
   { action: 'rotatePairing', label: 'gw.rotate', confirm: 'gw.confirm.rotate' },
   { action: 'restartGateway', label: 'gw.restart', confirm: null },
+  { action: 'emergencyEnable', label: 'gw.estopEnable', confirm: null },
   { action: 'emergencyStop', label: 'gw.estop', confirm: 'gw.confirm.estop' },
   { action: 'emergencyStatus', label: 'gw.estopStatus', confirm: null },
   { action: 'emergencyResume', label: 'gw.estopResume', confirm: null },
