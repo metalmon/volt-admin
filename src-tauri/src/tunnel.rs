@@ -433,12 +433,6 @@ impl Drop for Tunnel {
     }
 }
 
-/// Tauri-managed state holding the single active tunnel, if any. Replacing
-/// or clearing the `Option` drops (and thus tears down) the previous
-/// tunnel automatically.
-#[derive(Default)]
-pub struct TunnelState(pub Mutex<Option<Tunnel>>);
-
 /// Open an SSH tunnel for a `Remote`-mode profile: pick a free local port,
 /// spawn `ssh -N -L ...`, and wait until the forwarded port accepts a TCP
 /// connection (or time out and error).

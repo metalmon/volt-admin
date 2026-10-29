@@ -26,13 +26,19 @@ pub enum Holder {
     /// A window is showing this profile's panel.
     Window,
     /// A watcher is polling this profile's gateway. Nothing sets this yet —
-    /// it exists so the lifetime rule is written once, in one place.
+    /// it exists so the lifetime rule is written once, in one place, which
+    /// is also why the compiler is told not to mind.
+    #[allow(dead_code)]
     Monitor,
 }
 
 /// One live connection to a gateway.
 pub struct Connection {
     /// `None` for `Local` profiles, which reach the panel on loopback.
+    ///
+    /// Never read, and that is the point: the field OWNS the tunnel, and
+    /// dropping it is what kills the ssh child.
+    #[allow(dead_code)]
     pub tunnel: Option<Tunnel>,
     /// Where the panel answers on this machine.
     pub local_port: u16,
@@ -76,6 +82,10 @@ impl Registry {
 
     /// Drop `holder`'s claim. Returns whether that was the last one, in
     /// which case the connection itself is gone.
+    ///
+    /// Unused until a watcher can hold a connection; `release_all` is what
+    /// the window uses today.
+    #[allow(dead_code)]
     pub async fn release(&self, profile_id: &str, holder: Holder) -> bool {
         let mut map = self.0.lock().await;
         let Some(conn) = map.get_mut(profile_id) else {
@@ -119,12 +129,15 @@ impl Registry {
         dropped
     }
 
-    /// Where this profile's panel answers, if it is connected.
+    /// Where this profile's panel answers, if it is connected. For the
+    /// watcher that will poll it.
+    #[allow(dead_code)]
     pub async fn local_port(&self, profile_id: &str) -> Option<u16> {
         self.0.lock().await.get(profile_id).map(|c| c.local_port)
     }
 
     /// How many connections are open.
+    #[allow(dead_code)]
     pub async fn len(&self) -> usize {
         self.0.lock().await.len()
     }

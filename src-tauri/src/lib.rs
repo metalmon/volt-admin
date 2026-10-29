@@ -42,7 +42,7 @@ pub fn run() {
                 )
                 .build(),
         )
-        .manage(tunnel::TunnelState::default())
+        .manage(registry::Registry::default())
         .manage(pair::PairState::default())
         // Lazy pairing on the connected panel origin (see `crate::pair`): every
         // load first gets the gateway admin token (when held) for the panel's

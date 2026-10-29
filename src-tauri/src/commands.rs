@@ -7,7 +7,8 @@
 use crate::connection::{ConnMode, Profile};
 use crate::logx;
 use crate::pair::{self, PairContext, PairState};
-use crate::tunnel::{self, Lang, TunnelState};
+use crate::registry::{Holder, Registry};
+use crate::tunnel::{self, Lang};
 use serde::Serialize;
 use tauri::{command, AppHandle, Manager, Runtime, State};
 use tauri_plugin_store::StoreExt;
@@ -272,7 +273,7 @@ pub async fn connect<R: Runtime>(
     profile: Profile,
     password: Option<String>,
     lang: Option<String>,
-    tunnel_state: State<'_, TunnelState>,
+    registry: State<'_, Registry>,
 ) -> Result<ConnectResult, String> {
     // UI language for any user-facing tunnel error (RU-first default).
     let lang = Lang::from_code(lang.as_deref());
@@ -291,27 +292,32 @@ pub async fn connect<R: Runtime>(
             profile.id
         ),
     );
-    {
-        // A new connect attempt supersedes whatever was active before;
-        // dropping the old value (if any) kills its ssh child. The lock is
-        // released right away: opening the tunnel must not hold it (a wedged
-        // previous attempt would otherwise block every retry forever).
-        let mut guard = tunnel_state.0.lock().await;
-        *guard = None;
-    }
-    logx::log("connect", "old tunnel cleared, lock released");
 
     // `endpoint` (IP:port) feeds the OS window title so the copy shows which
     // instance it is connected to. Local = the direct 127.0.0.1:panel_port;
     // Remote = the actual remote host:panel_port (not the local tunnel port).
+    // Already connected to this profile (another holder, or the window
+    // reconnecting): reuse it rather than opening a second tunnel.
     let mut embedded = false;
     let mut tunnel_opt: Option<tunnel::Tunnel> = None;
-    let (base_url, endpoint) = match profile.mode {
-        ConnMode::Local => (
+    let held_port = registry.hold(&profile.id, Holder::Window).await;
+    if let Some(port) = held_port {
+        logx::log("connect", &format!("reusing connection on port {port}"));
+    }
+    let (base_url, endpoint) = match (held_port, profile.mode) {
+        (Some(port), ConnMode::Local) => (
+            format!("http://127.0.0.1:{port}"),
+            format!("127.0.0.1:{}", profile.panel_port),
+        ),
+        (Some(port), ConnMode::Remote) => (
+            format!("http://127.0.0.1:{port}"),
+            format!("{}:{}", profile.host, profile.panel_port),
+        ),
+        (None, ConnMode::Local) => (
             format!("http://127.0.0.1:{}", profile.panel_port),
             format!("127.0.0.1:{}", profile.panel_port),
         ),
-        ConnMode::Remote => {
+        (None, ConnMode::Remote) => {
             let started = std::time::Instant::now();
             let fut = tunnel::open_tunnel(&profile, password.as_deref(), lang);
             // Hard cap: a wedged ssh child must never hold this connect for
@@ -355,13 +361,27 @@ pub async fn connect<R: Runtime>(
             (url, format!("{}:{}", profile.host, profile.panel_port))
         }
     };
-    // Publish the tunnel only after it is fully usable; the lock is taken for
-    // a split second here, never held across the fallible connection setup.
-    if let Some(tun) = tunnel_opt {
-        let mut guard = tunnel_state.0.lock().await;
-        *guard = Some(tun);
+    // Publish only once the connection is fully usable, and release the
+    // previous one only after that: every `return Err` above happens while
+    // the connection the user already had is still up, so a failed attempt
+    // no longer costs them the one that worked.
+    if held_port.is_none() {
+        let local_port = match &tunnel_opt {
+            Some(tun) => tun.local_port,
+            None => profile.panel_port,
+        };
+        registry
+            .publish(&profile.id, tunnel_opt, local_port, Holder::Window)
+            .await;
     }
-    logx::log("connect", "tunnel published");
+    let dropped = registry
+        .release_others(Holder::Window, &profile.id)
+        .await
+        .len();
+    logx::log(
+        "connect",
+        &format!("connection published, {dropped} previous released"),
+    );
 
     // The gateway admin token for the panel's own "connect a new device"
     // button (see `crate::pair`). Failure just means no token; the panel then
@@ -430,13 +450,17 @@ pub async fn connect<R: Runtime>(
 #[command]
 pub async fn disconnect<R: Runtime>(
     app: AppHandle<R>,
-    tunnel_state: State<'_, TunnelState>,
+    registry: State<'_, Registry>,
     start_url: State<'_, StartUrl>,
     pair_state: State<'_, PairState>,
 ) -> Result<(), String> {
-    let mut guard = tunnel_state.0.lock().await;
-    *guard = None; // Drop kills the ssh child.
-    drop(guard);
+    // The window lets go of whatever it was showing; a connection nobody
+    // else holds goes down with its ssh child (see `crate::registry`).
+    let dropped = registry.release_all(Holder::Window).await;
+    logx::log(
+        "disconnect",
+        &format!("released {} connection(s)", dropped.len()),
+    );
     // Forget the connection's pairing context (and with it the password).
     pair_state.clear();
 
