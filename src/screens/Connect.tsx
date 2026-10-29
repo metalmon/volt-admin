@@ -12,6 +12,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
@@ -89,6 +90,20 @@ const importFieldLabelKey: Record<string, string> = {
   paircodeCommand: 'field.paircodeCommand',
 }
 
+/** The gateway actions the card's menu offers, in the order they appear.
+ *  `confirm` names the i18n key of the question asked first — the Rust side
+ *  refuses the action without that agreement, so this is the dialog, not
+ *  the rule (see `src-tauri/src/actions.rs`). */
+const gatewayActions = [
+  { action: 'rotatePairing', label: 'gw.rotate', confirm: 'gw.confirm.rotate' },
+  { action: 'restartGateway', label: 'gw.restart', confirm: null },
+  { action: 'emergencyStop', label: 'gw.estop', confirm: 'gw.confirm.estop' },
+  { action: 'emergencyStatus', label: 'gw.estopStatus', confirm: null },
+  { action: 'emergencyResume', label: 'gw.estopResume', confirm: null },
+] as const
+
+type GatewayActionId = (typeof gatewayActions)[number]['action']
+
 const importButtonClass = cn(
   'border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground',
 )
@@ -162,6 +177,14 @@ export default function Connect() {
   // is still on screen when the user goes to copy the diagnostics.
   const [lastError, setLastError] = useState<string | null>(null)
   const [diagCopied, setDiagCopied] = useState(false)
+  // A gateway action waiting for its answer, and the text its command
+  // printed — `--rotate` prints the code the administrator came for, so it
+  // stays until they close it.
+  const [pendingAction, setPendingAction] = useState<
+    { profile: Profile; action: GatewayActionId; label: string; confirm: string } | null
+  >(null)
+  const [actionBusy, setActionBusy] = useState(false)
+  const [actionResult, setActionResult] = useState<{ label: string; text: string } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -280,6 +303,32 @@ export default function Connect() {
       setTimeout(() => setCopiedId((c) => (c === p.id ? null : c)), 3000)
     } catch {
       setError(t('err.export.clipboard'))
+    }
+  }
+
+  /** Run one gateway action; `confirmed` is what Rust demands for the
+   *  destructive two. */
+  const runGatewayAction = async (
+    profile: Profile,
+    action: GatewayActionId,
+    label: string,
+    confirmed: boolean,
+  ) => {
+    setActionBusy(true)
+    try {
+      const text = await invoke<string>('run_gateway_action', {
+        profile,
+        action,
+        confirmed,
+        lang,
+      })
+      setError(null)
+      setActionResult({ label, text })
+    } catch (e) {
+      setError(t('gw.failed', { e: String(e) }))
+    } finally {
+      setActionBusy(false)
+      setPendingAction(null)
     }
   }
 
@@ -460,6 +509,30 @@ export default function Connect() {
                           {t('btn.exportFile')}
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
+                        {/* Actions on the GATEWAY this profile reaches,
+                            not on the profile itself. */}
+                        <DropdownMenuLabel>{t('gw.title')}</DropdownMenuLabel>
+                        {gatewayActions.map((a) => (
+                          <DropdownMenuItem
+                            key={a.action}
+                            disabled={actionBusy}
+                            onSelect={() => {
+                              if (a.confirm) {
+                                setPendingAction({
+                                  profile: p,
+                                  action: a.action,
+                                  label: t(a.label),
+                                  confirm: t(a.confirm),
+                                })
+                                return
+                              }
+                              void runGatewayAction(p, a.action, t(a.label), false)
+                            }}
+                          >
+                            {t(a.label)}
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem
                           variant="destructive"
                           onSelect={() => void deleteProfile(p.id)}
@@ -514,6 +587,56 @@ export default function Connect() {
             </li>
           ))}
         </ul>
+      )}
+
+      {pendingAction && (
+        <Card className="gap-3 border-destructive/40 py-5">
+          <CardContent className="flex flex-col gap-3 px-5">
+            <h2 className="font-heading text-lg text-foreground">{pendingAction.label}</h2>
+            <p className="text-sm text-destructive">{pendingAction.confirm}</p>
+            <p className="text-xs text-muted-foreground">{pendingAction.profile.name}</p>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" onClick={() => setPendingAction(null)}>
+                {t('btn.cancel')}
+              </Button>
+              <Button
+                variant="default"
+                disabled={actionBusy}
+                onClick={() =>
+                  void runGatewayAction(
+                    pendingAction.profile,
+                    pendingAction.action,
+                    pendingAction.label,
+                    true,
+                  )
+                }
+              >
+                {actionBusy ? <Spinner size={14} /> : null}
+                {t('import.confirm')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {actionResult && (
+        <Card className="gap-3 py-5">
+          <CardContent className="flex flex-col gap-3 px-5">
+            <h2 className="font-heading text-lg text-foreground">
+              {t('gw.result', { action: actionResult.label })}
+            </h2>
+            {/* Selectable: a rotate prints the code that has to be typed
+                somewhere else. */}
+            <pre className="max-h-64 overflow-auto rounded-[var(--radius)] border border-border bg-card px-3 py-2 text-xs whitespace-pre-wrap select-text text-foreground">
+              {actionResult.text}
+            </pre>
+            <div className="flex justify-end">
+              <Button variant="outline" onClick={() => setActionResult(null)}>
+                {t('btn.close')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {pending && (

@@ -60,6 +60,19 @@ const DropdownMenuItem = ({
   )
 }
 
+const DropdownMenuLabel = ({
+  className,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.Label>) => {
+  return (
+    <DropdownMenuPrimitive.Label
+      data-slot="dropdown-menu-label"
+      className={cn('px-2 py-1.5 text-xs font-medium text-muted-foreground', className)}
+      {...props}
+    />
+  )
+}
+
 const DropdownMenuSeparator = ({
   className,
   ...props
@@ -78,5 +91,6 @@ export {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
 }
