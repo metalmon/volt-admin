@@ -635,8 +635,12 @@ export default function Connect() {
               <Button variant="outline" onClick={() => setPendingAction(null)}>
                 {t('btn.cancel')}
               </Button>
+              {/* Its own verb, and the destructive colour: this card asks
+                  about revoking or stopping, and it used to confirm with
+                  «Импортировать» — the import preview's button, copied with
+                  the card. */}
               <Button
-                variant="default"
+                variant="destructive"
                 disabled={actionBusy}
                 onClick={() =>
                   void runGatewayAction(
@@ -648,7 +652,7 @@ export default function Connect() {
                 }
               >
                 {actionBusy ? <Spinner size={14} /> : null}
-                {t('import.confirm')}
+                {t('gw.run')}
               </Button>
             </div>
           </CardContent>
