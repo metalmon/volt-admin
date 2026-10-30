@@ -19,7 +19,7 @@ Chosen over a general "run a command on the gateway" (see Out of scope):
 | action | command | confirm |
 |---|---|---|
 | Revoke all pairings | `gateway get-paircode --rotate` | yes, naming what breaks |
-| Turn the event log on | `config set observability.backend log` and/or `config set observability.log_persistence rolling` | no |
+| Turn the event log on | up to three of `config set observability.backend log`, `… log_persistence rolling`, `… log_persistence_max_entries 50000` | no |
 | Turn the emergency stop on | `config set security.estop.enabled true` | no |
 | Emergency stop | `estop --level kill-all` | yes, naming what stops |
 | Emergency stop — state | `estop status` | no |
@@ -42,8 +42,17 @@ takes nothing away, so it does not confirm; it writes one key and the gateway
 picks it up when it next reads its config.
 
 **The event log is what monitoring reads.** `GET /api/logs` serves nothing
-unless the gateway both records events (`observability.backend` is not
-`none`) and keeps them (`observability.log_persistence` is not `off`). One
+unless the gateway records events (`observability.backend` is not `none`),
+keeps them (`observability.log_persistence` is not `off`) and keeps ENOUGH
+of them (`observability.log_persistence_max_entries`).
+
+Those are three settings because voltd's defaults are three different
+answers, checked against an empty config directory: `backend = none` records
+nothing at all, `log_persistence = rolling` is already right, and
+`max_entries = 200` is a window a quiet gateway turns over in under an hour
+— one real deployment wrote 5760 warnings a day with nothing wrong. The
+value this item writes, 50000, is what the deployments this app ships with
+are configured for. One
 item turns on whichever of the two is off — and ONLY that one: a gateway
 exporting to `otel` or `prometheus` must not be put back to `log` because an
 item set both keys blindly, and a gateway that did not answer gets nothing

@@ -123,12 +123,14 @@ type GatewayActionId =
   | (typeof gatewayActions)[number]['action']
   | 'enableObservability'
   | 'enableLogPersistence'
+  | 'enableLogWindow'
 
 type GatewayFlags = {
   estopEnabled: boolean
   canResume: boolean
   logsRecorded: boolean
   logsPersisted: boolean
+  logsWindowOk: boolean
 }
 
 const importButtonClass = cn(
@@ -378,6 +380,7 @@ export default function Connect() {
     const steps: GatewayActionId[] = []
     if (!flags.logsRecorded) steps.push('enableObservability')
     if (!flags.logsPersisted) steps.push('enableLogPersistence')
+    if (!flags.logsWindowOk) steps.push('enableLogWindow')
     if (steps.length === 0) return
     setActionBusy(true)
     const printed: string[] = []
@@ -389,7 +392,7 @@ export default function Connect() {
       }
       setSecurity((m) => ({
         ...m,
-        [profile.id]: { ...flags, logsRecorded: true, logsPersisted: true },
+        [profile.id]: { ...flags, logsRecorded: true, logsPersisted: true, logsWindowOk: true },
       }))
       setActionResult({ label, text: printed.join('\n') })
     } catch (e) {
@@ -683,10 +686,13 @@ export default function Connect() {
                             actionBusy ||
                             (security[p.id] !== undefined &&
                               security[p.id].logsRecorded &&
-                              security[p.id].logsPersisted)
+                              security[p.id].logsPersisted &&
+                              security[p.id].logsWindowOk)
                           }
                           title={
-                            security[p.id]?.logsRecorded && security[p.id]?.logsPersisted
+                            security[p.id]?.logsRecorded &&
+                            security[p.id]?.logsPersisted &&
+                            security[p.id]?.logsWindowOk
                               ? t('gw.telemetryOn')
                               : undefined
                           }
