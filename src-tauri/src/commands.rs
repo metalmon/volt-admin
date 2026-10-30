@@ -395,6 +395,19 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// The path to open inside the panel: its root unless the caller named a
+/// page, and only a page this app knows.
+///
+/// An allow-list, not the string handed in: the value reaches a
+/// `window.navigate` on the panel's own origin, where a crafted path is a
+/// request made as the signed-in administrator.
+fn panel_page(page: Option<&str>) -> &'static str {
+    match page {
+        Some("logs") => "/logs",
+        _ => "/",
+    }
+}
+
 /// What `connect` hands back to the Connect screen.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -413,6 +426,9 @@ pub struct ConnectResult {
 ///   so a failed attempt leaves the working one alone (`crate::registry`).
 ///
 /// `password` is only used for `AuthMethod::Password` profiles and is
+/// `page` names where in the panel to land: `None` is its root, which is
+/// what pressing «Подключить» means, and a notification click asks instead
+/// for the page that shows what it was notifying about.
 /// never persisted — see `crate::tunnel`.
 #[command]
 pub async fn connect<R: Runtime>(
@@ -421,6 +437,7 @@ pub async fn connect<R: Runtime>(
     profile: Profile,
     password: Option<String>,
     lang: Option<String>,
+    page: Option<String>,
     registry: State<'_, Registry>,
 ) -> Result<ConnectResult, String> {
     // UI language for any user-facing tunnel error (RU-first default).
@@ -671,7 +688,11 @@ pub async fn connect<R: Runtime>(
     // index.html there, which itself pulls assets from `/_app/*`. `/_app/`
     // is only the static-asset prefix — requesting it bare returns 400 by
     // design (see the gateway's static_files handler), so navigate to `/`.
-    let panel_url = format!("{}/", base_url.trim_end_matches('/'));
+    let panel_url = format!(
+        "{}{}",
+        base_url.trim_end_matches('/'),
+        panel_page(page.as_deref())
+    );
     logx::log("connect", &format!("navigate to {panel_url}"));
     let url = tauri::Url::parse(&panel_url).map_err(|e| e.to_string())?;
     navigate(&window, url)?;
@@ -731,6 +752,22 @@ pub async fn disconnect<R: Runtime>(
         Some(url) => navigate(&window, url),
         // Never connected this session → nothing to navigate back to.
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod panel_page_tests {
+    use super::panel_page;
+
+    #[test]
+    fn only_the_pages_this_app_knows_are_opened() {
+        // The value lands in a `navigate` on the panel's own origin, where
+        // the administrator is signed in: a path from anywhere but this
+        // list is not a page, it is a request made as them.
+        assert_eq!(panel_page(Some("logs")), "/logs");
+        assert_eq!(panel_page(None), "/");
+        assert_eq!(panel_page(Some("..%2Fadmin")), "/");
+        assert_eq!(panel_page(Some("/logs")), "/", "not even a near miss");
     }
 }
 

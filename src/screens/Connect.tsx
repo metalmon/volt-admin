@@ -456,7 +456,9 @@ export default function Connect() {
     if (!openRequest || loading) return
     const wanted = profiles.find((p) => p.id === openRequest)
     setOpenRequest(null)
-    if (wanted) void connect(wanted)
+    // Straight to the page that shows what the notification was about,
+    // not to the panel's front door.
+    if (wanted) void connect(wanted, 'logs')
   }, [openRequest, profiles, loading])
 
   const closeForm = () => {
@@ -510,7 +512,7 @@ export default function Connect() {
     }
   }
 
-  const doConnect = async (profile: Profile, password?: string) => {
+  const doConnect = async (profile: Profile, password?: string, page?: 'logs') => {
     setConnectingId(profile.id)
     setError(null)
     try {
@@ -527,6 +529,7 @@ export default function Connect() {
           profile,
           password,
           lang,
+          page,
         }),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error(t('err.connectTimeout'))), 90_000),
@@ -541,14 +544,14 @@ export default function Connect() {
     }
   }
 
-  const connect = (profile: Profile) => {
+  const connect = (profile: Profile, page?: 'logs') => {
     if (profile.mode === 'remote' && profile.auth === 'password' && passwordPromptId !== profile.id) {
       setError(null)
       setPasswordPromptId(profile.id)
       setPasswordValue('')
       return
     }
-    void doConnect(profile, passwordPromptId === profile.id ? passwordValue : undefined)
+    void doConnect(profile, passwordPromptId === profile.id ? passwordValue : undefined, page)
   }
 
   return (
@@ -1100,10 +1103,10 @@ ${t('gw.warn.noResume')}`
                 <label className="flex items-center gap-2 text-sm text-foreground">
                   <input
                     type="checkbox"
-                    // The arbitrary-value class did not compile and the box
-                    // came out Windows blue; `accent-color` is one property,
-                    // so it is set as one.
-                    style={{ accentColor: 'var(--primary)' }}
+                    // `--primary` does not exist here — the brand token is
+                    // `--color-brand` (see src/index.css), which is why two
+                    // attempts at this left a Windows-blue box.
+                    style={{ accentColor: 'var(--color-brand)' }}
                     className="size-4"
                     checked={draft.watch}
                     disabled={draft.mode === 'remote' || draft.auth === 'password'}
