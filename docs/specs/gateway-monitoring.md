@@ -108,6 +108,19 @@ lives in memory for the length of a connection. A watched profile needs a
 session token that survives restarts, and `tauri-plugin-store` writes plain
 JSON next to the profiles.
 
+The token is kept WITH the gateway it was minted for (the profile's
+`connection_fingerprint`), and is used only while the profile still names
+that gateway: a watched profile whose `panel_port` is edited is a different
+gateway on the same machine, and the old token must not be sent to it.
+
+A 401 means the gateway revoked it (any `--rotate` does). The watcher pairs
+again ONCE and then stops with a reason — a watcher that re-pairs on every
+refusal would mint a pairing code every minute at a gateway that keeps
+saying no. Pairing unattended is what ticking "watch" consents to; verifying
+that the loopback port is really voltd (rather than a process that took the
+port first) is an app-wide question this feature does not answer — `connect`
+pairs the same way.
+
 So: **a session token is stored only for profiles the administrator marks as
 watched**, it is never written into an exported profile document (it is not
 a `Profile` field — a separate store keyed by profile id), and the OS

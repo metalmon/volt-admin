@@ -360,8 +360,11 @@ pub fn save_profile(app: AppHandle, profile: Profile) -> Result<(), String> {
         None => profiles.push(profile),
     }
     persist_profiles(&app, &profiles)?;
-    // A profile that stopped being watched leaves no token behind, and the
-    // watchers follow the store either way (`crate::watch`).
+    // A profile that stopped being watched leaves no token behind. One
+    // that still is keeps its token only while it still names the same
+    // gateway — `settings::watch_token` checks the fingerprint, so an
+    // edited profile pairs again rather than sending the old gateway's
+    // token to a new one.
     if !watch {
         crate::settings::forget_watch_token(&app, &id);
     }

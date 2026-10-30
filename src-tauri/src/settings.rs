@@ -133,22 +133,48 @@ pub fn set_language<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Result<(), St
     store.save().map_err(|e| e.to_string())
 }
 
-/// The session token the watcher polls this profile's gateway with, if one
-/// was kept.
-pub fn watch_token<R: Runtime>(app: &AppHandle<R>, profile_id: &str) -> Option<String> {
+/// The token kept for this profile, but ONLY if it was minted for the
+/// gateway the profile names today.
+///
+/// A profile can be edited while it is watched — a different `panel_port`
+/// is a different gateway on this machine — and a token minted for the old
+/// one must not be sent to the new one. The fingerprint is the same one
+/// `crate::registry` refuses stale connections by.
+pub fn watch_token<R: Runtime>(
+    app: &AppHandle<R>,
+    profile_id: &str,
+    fingerprint: &str,
+) -> Option<String> {
     let store = app.store(WATCH_STORE).ok()?;
-    let token = store.get(profile_id)?;
-    token.as_str().map(str::to_string).filter(|t| !t.is_empty())
+    token_for(&store.get(profile_id)?, fingerprint)
 }
 
-/// Keep a token for a watched profile. Nothing else writes this file.
+/// The pure half: a kept entry is `{"token": …, "fingerprint": …}`, and it
+/// answers only for its own gateway.
+fn token_for(entry: &serde_json::Value, fingerprint: &str) -> Option<String> {
+    if entry.get("fingerprint")?.as_str()? != fingerprint {
+        return None;
+    }
+    entry
+        .get("token")?
+        .as_str()
+        .map(str::to_string)
+        .filter(|t| !t.is_empty())
+}
+
+/// Keep a token for a watched profile, with the gateway it belongs to.
+/// Nothing else writes this file.
 pub fn remember_watch_token<R: Runtime>(
     app: &AppHandle<R>,
     profile_id: &str,
     token: &str,
+    fingerprint: &str,
 ) -> Result<(), String> {
     let store = app.store(WATCH_STORE).map_err(|e| e.to_string())?;
-    store.set(profile_id, serde_json::Value::String(token.to_string()));
+    store.set(
+        profile_id,
+        serde_json::json!({ "token": token, "fingerprint": fingerprint }),
+    );
     store.save().map_err(|e| e.to_string())
 }
 
@@ -165,6 +191,31 @@ pub fn forget_watch_token<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kept_token_answers_only_for_its_own_gateway() {
+        // A watched profile can be edited — a different panel port is a
+        // different gateway on this machine — and the token minted for the
+        // old one must not be handed to the new one.
+        let entry = serde_json::json!({"token": "t", "fingerprint": "fp1"});
+        assert_eq!(token_for(&entry, "fp1").as_deref(), Some("t"));
+        assert_eq!(token_for(&entry, "fp2"), None);
+    }
+
+    #[test]
+    fn an_entry_without_a_gateway_is_not_trusted() {
+        // What an older version wrote (a bare string), and anything else
+        // that does not say which gateway it is for: pair again.
+        assert_eq!(token_for(&serde_json::json!("t"), "fp1"), None);
+        assert_eq!(token_for(&serde_json::json!({"token": "t"}), "fp1"), None);
+        assert_eq!(
+            token_for(
+                &serde_json::json!({"token": "", "fingerprint": "fp1"}),
+                "fp1"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn a_rotate_forgets_every_profile_pointing_at_that_gateway() {

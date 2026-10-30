@@ -286,14 +286,15 @@ async fn obtain_token<R: Runtime>(
     app: &AppHandle<R>,
     p: &crate::connection::Profile,
 ) -> Result<String, String> {
-    if let Some(token) = crate::settings::watch_token(app, &p.id) {
+    let fingerprint = p.connection_fingerprint();
+    if let Some(token) = crate::settings::watch_token(app, &p.id, &fingerprint) {
         return Ok(token);
     }
     let lang = crate::settings::language(app);
     let code = crate::pair::mint_code(p, None, false, lang).await?;
     let origin = crate::pair::origin_of(&base_url(p)).ok_or("bad base url")?;
     let token = crate::pair::redeem_code(&origin, &code).await?;
-    crate::settings::remember_watch_token(app, &p.id, &token)?;
+    crate::settings::remember_watch_token(app, &p.id, &token, &fingerprint)?;
     Ok(token)
 }
 
@@ -302,11 +303,18 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
     let base = base_url(&p);
     let client = match reqwest::Client::builder().no_proxy().build() {
         Ok(c) => c,
-        Err(e) => return give_up(&app, &p, &format!("http client: {e}")),
+        Err(e) => {
+            logx::log("watch", &format!("{}: no http client ({e})", p.id));
+            return give_up(&app, &p, Trouble::Broken);
+        }
     };
     let mut token = match obtain_token(&app, &p).await {
         Ok(t) => t,
-        Err(e) => return give_up(&app, &p, &e),
+        // The REASON stays out of the log and out of the UI: a failed
+        // pairing command's error is built from what the command printed,
+        // and what `get-paircode` prints is a pairing code
+        // (`docs/specs/diagnostics.md`).
+        Err(_) => return give_up(&app, &p, Trouble::NoPairing),
     };
     let mut cursor: Option<Cursor> = None;
     let mut seen: HashSet<String> = HashSet::new();
@@ -324,13 +332,13 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
         match answer {
             Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
                 if repaired {
-                    return give_up(&app, &p, "token-refused");
+                    return give_up(&app, &p, Trouble::TokenRefused);
                 }
                 repaired = true;
                 crate::settings::forget_watch_token(&app, &p.id);
                 match obtain_token(&app, &p).await {
                     Ok(t) => token = t,
-                    Err(e) => return give_up(&app, &p, &e),
+                    Err(_) => return give_up(&app, &p, Trouble::NoPairing),
                 }
                 continue;
             }
@@ -345,7 +353,7 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
                         if !poll.persistence_enabled {
                             // Nothing to watch here, and silence must never
                             // be shown as health.
-                            return give_up(&app, &p, "no-log");
+                            return give_up(&app, &p, Trouble::NoLog);
                         }
                         if fresh_start(started_at.as_deref(), poll.daemon_started_at.as_deref()) {
                             // The gateway restarted: the cursor points into
@@ -438,9 +446,37 @@ fn announce<R: Runtime>(app: &AppHandle<R>, lang: Lang, profile_name: &str, fres
     }
 }
 
+/// Why a watcher stopped. A CATEGORY, never an error's text: this reaches
+/// both the log and the UI, and the text a failed pairing carries is built
+/// from what `get-paircode` printed.
+#[derive(Debug, Clone, Copy)]
+enum Trouble {
+    /// The gateway keeps no log — there is nothing to poll.
+    NoLog,
+    /// It refuses the pairing we hold, twice.
+    TokenRefused,
+    /// We could not obtain a session at all.
+    NoPairing,
+    /// Something on this side: no HTTP client.
+    Broken,
+}
+
+impl Trouble {
+    /// The key the UI looks up (`watch.<key>` in `src/lib/i18n.tsx`).
+    fn key(self) -> &'static str {
+        match self {
+            Self::NoLog => "no-log",
+            Self::TokenRefused => "token-refused",
+            Self::NoPairing => "no-pairing",
+            Self::Broken => "broken",
+        }
+    }
+}
+
 /// Stop watching this profile, with a reason the card can show. The task
 /// ends here: whatever is wrong needs a person, not another poll.
-fn give_up<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, trouble: &str) {
+fn give_up<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, trouble: Trouble) {
+    let trouble = trouble.key();
     logx::log("watch", &format!("{}: gave up ({trouble})", p.id));
     let status = Status {
         profile_id: p.id.clone(),
