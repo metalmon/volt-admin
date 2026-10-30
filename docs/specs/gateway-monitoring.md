@@ -226,6 +226,55 @@ window, which the current model refuses by design: "Multi-copy model: no
 tray. Closing the window quits this copy" (`lib.rs`). Resolve that first —
 see Decide before building.
 
+## The gateway pushes, too: `GET /api/events`
+
+Found by probing the gateway rather than by reading about it — `/api/events`
+answered 401 where every made-up path answered 404, and with a token it
+answers `content-type: text/event-stream` and starts sending the same
+structured events as `/api/logs`, live.
+
+So the watcher does not poll. It **catches up once and then listens**:
+
+- `GET /api/logs` on every (re)connection — "what is wrong right now",
+  including everything missed while disconnected;
+- `GET /api/events` held open — "what is happening", arriving in seconds
+  rather than within a minute.
+
+What the stream will and will not do, all checked against a live gateway:
+
+- **`severity_min` is ignored** on this endpoint: asked for 17, it sent a
+  13. Filtering is ours.
+- **`hide_internal=true` IS honoured** — and must not be used, for the
+  reason the poll already had: the daemon's own failures are `internal`.
+- **Frames carry only `data:`** — no `id:`, so no `Last-Event-ID` resume.
+  That is why the catch-up fetch exists.
+- **There is no heartbeat.** A gateway with nothing to say and a connection
+  that died look identical from here, so the stream is recycled after five
+  minutes of silence; the catch-up on reconnect makes that free.
+
+## Watching through a tunnel
+
+A `Remote` profile's gateway is reachable only through SSH, and watching it
+means a tunnel with nobody at the keyboard. The registry built in phase 1
+already has the holder for exactly this (`Holder::Monitor`), and the rules
+are:
+
+- **The tunnel stays up** while the profile is watched. Opening one per
+  poll would mean an ssh handshake a minute, a line in the server's auth
+  log each time, and a second of latency before every answer — and with a
+  stream instead of a poll there is nothing to open it for.
+- **It binds the port a window would bind** (`localPort` / the stable
+  per-profile port), so a window opened later JOINS that connection instead
+  of raising a second tunnel. That is what the registry's holders are for.
+- **Agent or key only.** A password profile would mean keeping the password
+  for as long as the app runs, which this app refuses everywhere else.
+- **A tunnel that will not come up degrades and says so**: retry with
+  backoff (5s, 30s, 5min), and after that the card says the tunnel is down
+  rather than showing a quiet gateway. Silence and health look the same
+  from outside, which is the whole reason this feature exists.
+- **Unwatching releases the holder**, and the tunnel goes with it unless a
+  window is still holding it.
+
 ## Turning the source on
 
 A gateway that records nothing (`observability.backend = none`) or keeps
