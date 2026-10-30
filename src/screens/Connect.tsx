@@ -557,6 +557,249 @@ export default function Connect() {
     void doConnect(profile, passwordPromptId === profile.id ? passwordValue : undefined, page)
   }
 
+  /** The profile form. Rendered under the card being edited, or at the
+   *  bottom when it is a new profile — a form far from its card leaves
+   *  the reader guessing which profile they are changing. */
+  const formCard = formOpen ? (
+        <Card className="gap-4 py-5">
+          <CardContent className="flex flex-col gap-4 px-5">
+            <h2 className="font-heading text-lg text-foreground">
+              {editingId ? t('form.editTitle') : t('form.newTitle')}
+            </h2>
+            <form
+              className="flex flex-col gap-4"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void saveDraft()
+              }}
+            >
+              <div className="flex gap-2">
+                {(['local', 'remote'] as const).map((m) => (
+                  <Button
+                    key={m}
+                    type="button"
+                    variant={draft.mode === m ? 'default' : 'outline'}
+                    className="flex-1"
+                    onClick={() =>
+                      setDraft((d) => ({
+                        ...d,
+                        mode: m,
+                        host: m === 'local' ? '127.0.0.1' : d.host === '127.0.0.1' ? '' : d.host,
+                        // Local has no tunnel: drop a port typed before the switch.
+                        localPort: m === 'local' ? null : d.localPort,
+                      }))
+                    }
+                  >
+                    {t(modeLabelKey[m])}
+                  </Button>
+                ))}
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-name">{t('field.name')}</Label>
+                <Input
+                  id="profile-name"
+                  value={draft.name}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value
+                    setDraft((d) => ({ ...d, name: v }))
+                  }}
+                  placeholder={t('field.name.ph')}
+                  required
+                />
+              </div>
+
+              {draft.mode === 'remote' && (
+                <>
+                  <div className="flex gap-3">
+                    <div className="flex flex-1 flex-col gap-1.5">
+                      <Label htmlFor="profile-host">{t('field.host')}</Label>
+                      <Input
+                        id="profile-host"
+                        value={draft.host}
+                        onChange={(e) => {
+                          const v = e.currentTarget.value
+                          setDraft((d) => ({ ...d, host: v }))
+                        }}
+                        placeholder="example.com"
+                        required
+                      />
+                    </div>
+                    <div className="flex w-24 flex-col gap-1.5">
+                      <Label htmlFor="profile-port">{t('field.sshPort')}</Label>
+                      <Input
+                        id="profile-port"
+                        type="number"
+                        value={draft.port}
+                        onChange={(e) => {
+                          const v = Number(e.currentTarget.value)
+                          setDraft((d) => ({ ...d, port: v }))
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="profile-user">{t('field.user')}</Label>
+                    <Input
+                      id="profile-user"
+                      value={draft.user}
+                      onChange={(e) => {
+                        const v = e.currentTarget.value
+                        setDraft((d) => ({ ...d, user: v }))
+                      }}
+                      placeholder="admin"
+                      required
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="profile-auth">{t('field.auth')}</Label>
+                    <Select
+                      value={draft.auth}
+                      onValueChange={(v) => setDraft((d) => ({ ...d, auth: v as AuthMethod }))}
+                    >
+                      <SelectTrigger id="profile-auth" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(Object.keys(authLabelKey) as AuthMethod[]).map((a) => (
+                          <SelectItem key={a} value={a}>
+                            {t(authLabelKey[a])}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <p className="-mt-2.5 text-xs text-muted-foreground">{t('auth.hint')}</p>
+
+                  {draft.auth === 'keyFile' && (
+                    <div className="flex flex-col gap-1.5">
+                      <Label htmlFor="profile-key-path">{t('field.keyPath')}</Label>
+                      <Input
+                        id="profile-key-path"
+                        value={draft.keyPath ?? ''}
+                        onChange={(e) => {
+                          const v = e.currentTarget.value
+                          setDraft((d) => ({ ...d, keyPath: v || null }))
+                        }}
+                        placeholder="~/.ssh/id_ed25519"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-panel-port">{t('field.panelPort')}</Label>
+                <Input
+                  id="profile-panel-port"
+                  type="number"
+                  value={draft.panelPort}
+                  onChange={(e) => {
+                    const v = Number(e.currentTarget.value)
+                    setDraft((d) => ({ ...d, panelPort: v }))
+                  }}
+                />
+              </div>
+
+              {/* Only `Remote` opens a tunnel — `Local` talks to the panel
+                  directly (see `commands::connect`), so there is no local
+                  forwarded port to pick there. */}
+              {draft.mode === 'remote' && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="profile-local-port">{t('field.localPort')}</Label>
+                  <Input
+                    id="profile-local-port"
+                    type="number"
+                    placeholder={t('field.localPort.ph')}
+                    value={draft.localPort ?? ''}
+                    onChange={(e) => {
+                      const v = e.currentTarget.value
+                      const n = Number(v)
+                      setDraft((d) => ({ ...d, localPort: v === '' ? null : Number.isNaN(n) ? null : n }))
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">{t('field.localPort.hint')}</p>
+                </div>
+              )}
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-principal">{t('field.principal')}</Label>
+                <Input
+                  id="profile-principal"
+                  placeholder="admin"
+                  value={draft.principal ?? ''}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value
+                    setDraft((d) => ({ ...d, principal: v || null }))
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">{t('field.principal.hint')}</p>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="profile-paircode-command">{t('field.paircodeCommand')}</Label>
+                <Input
+                  id="profile-paircode-command"
+                  placeholder={t('field.paircodeCommand.ph')}
+                  value={draft.paircodeCommand ?? ''}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value
+                    setDraft((d) => ({ ...d, paircodeCommand: v || null }))
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">{t('field.paircodeCommand.hint')}</p>
+              </div>
+
+              {/* Monitoring is opt-in per profile: nothing is watched
+                  because it exists (`docs/specs/gateway-monitoring.md`). */}
+              <div className="flex flex-col gap-1.5">
+                <label className="flex items-center gap-2 text-sm text-foreground">
+                  <input
+                    type="checkbox"
+                    // `--primary` does not exist here — the brand token is
+                    // `--color-brand` (see src/index.css), which is why two
+                    // attempts at this left a Windows-blue box.
+                    style={{ accentColor: 'var(--color-brand)' }}
+                    className="size-4"
+                    checked={draft.watch}
+                    disabled={draft.auth === 'password'}
+                    onChange={(e) => {
+                      const on = e.currentTarget.checked
+                      setDraft((d) => ({ ...d, watch: on }))
+                    }}
+                  />
+                  {t('field.watch')}
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {draft.auth === 'password'
+                    ? t('watch:password')
+                    : draft.mode === 'remote'
+                      ? t('field.watch.remoteHint')
+                      : t('field.watch.hint')}
+                </p>
+              </div>
+
+              {/* Fluent: form action row lives at the bottom-right, primary
+                  action ("Save") rightmost, secondary ("Cancel") to its left. */}
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+                {/* Export lives here, not on the card: copying a profile is a
+                    set-up-another-machine action, and the card's row is for
+                    the everyday three. Editing is where you already are when
+                    you want to hand this profile to someone. */}
+                <Button type="button" variant="outline" onClick={closeForm}>
+                  {t('btn.cancel')}
+                </Button>
+                <Button type="submit" variant="default">
+                  {t('btn.save')}
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+  ) : null
+
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-10">
       <header className="relative text-center">
@@ -801,6 +1044,7 @@ ${t('gw.warn.noResume')}`
                   </CardFooter>
                 )}
               </Card>
+              {editingId === p.id ? formCard : null}
             </li>
           ))}
         </ul>
@@ -923,245 +1167,10 @@ ${t('gw.warn.noResume')}`
         </Card>
       )}
 
-      {formOpen ? (
-        <Card className="gap-4 py-5">
-          <CardContent className="flex flex-col gap-4 px-5">
-            <h2 className="font-heading text-lg text-foreground">
-              {editingId ? t('form.editTitle') : t('form.newTitle')}
-            </h2>
-            <form
-              className="flex flex-col gap-4"
-              onSubmit={(e) => {
-                e.preventDefault()
-                void saveDraft()
-              }}
-            >
-              <div className="flex gap-2">
-                {(['local', 'remote'] as const).map((m) => (
-                  <Button
-                    key={m}
-                    type="button"
-                    variant={draft.mode === m ? 'default' : 'outline'}
-                    className="flex-1"
-                    onClick={() =>
-                      setDraft((d) => ({
-                        ...d,
-                        mode: m,
-                        host: m === 'local' ? '127.0.0.1' : d.host === '127.0.0.1' ? '' : d.host,
-                        // Local has no tunnel: drop a port typed before the switch.
-                        localPort: m === 'local' ? null : d.localPort,
-                      }))
-                    }
-                  >
-                    {t(modeLabelKey[m])}
-                  </Button>
-                ))}
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="profile-name">{t('field.name')}</Label>
-                <Input
-                  id="profile-name"
-                  value={draft.name}
-                  onChange={(e) => {
-                    const v = e.currentTarget.value
-                    setDraft((d) => ({ ...d, name: v }))
-                  }}
-                  placeholder={t('field.name.ph')}
-                  required
-                />
-              </div>
-
-              {draft.mode === 'remote' && (
-                <>
-                  <div className="flex gap-3">
-                    <div className="flex flex-1 flex-col gap-1.5">
-                      <Label htmlFor="profile-host">{t('field.host')}</Label>
-                      <Input
-                        id="profile-host"
-                        value={draft.host}
-                        onChange={(e) => {
-                          const v = e.currentTarget.value
-                          setDraft((d) => ({ ...d, host: v }))
-                        }}
-                        placeholder="example.com"
-                        required
-                      />
-                    </div>
-                    <div className="flex w-24 flex-col gap-1.5">
-                      <Label htmlFor="profile-port">{t('field.sshPort')}</Label>
-                      <Input
-                        id="profile-port"
-                        type="number"
-                        value={draft.port}
-                        onChange={(e) => {
-                          const v = Number(e.currentTarget.value)
-                          setDraft((d) => ({ ...d, port: v }))
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="profile-user">{t('field.user')}</Label>
-                    <Input
-                      id="profile-user"
-                      value={draft.user}
-                      onChange={(e) => {
-                        const v = e.currentTarget.value
-                        setDraft((d) => ({ ...d, user: v }))
-                      }}
-                      placeholder="admin"
-                      required
-                    />
-                  </div>
-
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="profile-auth">{t('field.auth')}</Label>
-                    <Select
-                      value={draft.auth}
-                      onValueChange={(v) => setDraft((d) => ({ ...d, auth: v as AuthMethod }))}
-                    >
-                      <SelectTrigger id="profile-auth" className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(Object.keys(authLabelKey) as AuthMethod[]).map((a) => (
-                          <SelectItem key={a} value={a}>
-                            {t(authLabelKey[a])}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <p className="-mt-2.5 text-xs text-muted-foreground">{t('auth.hint')}</p>
-
-                  {draft.auth === 'keyFile' && (
-                    <div className="flex flex-col gap-1.5">
-                      <Label htmlFor="profile-key-path">{t('field.keyPath')}</Label>
-                      <Input
-                        id="profile-key-path"
-                        value={draft.keyPath ?? ''}
-                        onChange={(e) => {
-                          const v = e.currentTarget.value
-                          setDraft((d) => ({ ...d, keyPath: v || null }))
-                        }}
-                        placeholder="~/.ssh/id_ed25519"
-                      />
-                    </div>
-                  )}
-                </>
-              )}
-
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="profile-panel-port">{t('field.panelPort')}</Label>
-                <Input
-                  id="profile-panel-port"
-                  type="number"
-                  value={draft.panelPort}
-                  onChange={(e) => {
-                    const v = Number(e.currentTarget.value)
-                    setDraft((d) => ({ ...d, panelPort: v }))
-                  }}
-                />
-              </div>
-
-              {/* Only `Remote` opens a tunnel — `Local` talks to the panel
-                  directly (see `commands::connect`), so there is no local
-                  forwarded port to pick there. */}
-              {draft.mode === 'remote' && (
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="profile-local-port">{t('field.localPort')}</Label>
-                  <Input
-                    id="profile-local-port"
-                    type="number"
-                    placeholder={t('field.localPort.ph')}
-                    value={draft.localPort ?? ''}
-                    onChange={(e) => {
-                      const v = e.currentTarget.value
-                      const n = Number(v)
-                      setDraft((d) => ({ ...d, localPort: v === '' ? null : Number.isNaN(n) ? null : n }))
-                    }}
-                  />
-                  <p className="text-xs text-muted-foreground">{t('field.localPort.hint')}</p>
-                </div>
-              )}
-
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="profile-principal">{t('field.principal')}</Label>
-                <Input
-                  id="profile-principal"
-                  placeholder="admin"
-                  value={draft.principal ?? ''}
-                  onChange={(e) => {
-                    const v = e.currentTarget.value
-                    setDraft((d) => ({ ...d, principal: v || null }))
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">{t('field.principal.hint')}</p>
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="profile-paircode-command">{t('field.paircodeCommand')}</Label>
-                <Input
-                  id="profile-paircode-command"
-                  placeholder={t('field.paircodeCommand.ph')}
-                  value={draft.paircodeCommand ?? ''}
-                  onChange={(e) => {
-                    const v = e.currentTarget.value
-                    setDraft((d) => ({ ...d, paircodeCommand: v || null }))
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">{t('field.paircodeCommand.hint')}</p>
-              </div>
-
-              {/* Monitoring is opt-in per profile: nothing is watched
-                  because it exists (`docs/specs/gateway-monitoring.md`). */}
-              <div className="flex flex-col gap-1.5">
-                <label className="flex items-center gap-2 text-sm text-foreground">
-                  <input
-                    type="checkbox"
-                    // `--primary` does not exist here — the brand token is
-                    // `--color-brand` (see src/index.css), which is why two
-                    // attempts at this left a Windows-blue box.
-                    style={{ accentColor: 'var(--color-brand)' }}
-                    className="size-4"
-                    checked={draft.watch}
-                    disabled={draft.auth === 'password'}
-                    onChange={(e) => {
-                      const on = e.currentTarget.checked
-                      setDraft((d) => ({ ...d, watch: on }))
-                    }}
-                  />
-                  {t('field.watch')}
-                </label>
-                <p className="text-xs text-muted-foreground">
-                  {draft.auth === 'password'
-                    ? t('watch:password')
-                    : draft.mode === 'remote'
-                      ? t('field.watch.remoteHint')
-                      : t('field.watch.hint')}
-                </p>
-              </div>
-
-              {/* Fluent: form action row lives at the bottom-right, primary
-                  action ("Save") rightmost, secondary ("Cancel") to its left. */}
-              <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
-                {/* Export lives here, not on the card: copying a profile is a
-                    set-up-another-machine action, and the card's row is for
-                    the everyday three. Editing is where you already are when
-                    you want to hand this profile to someone. */}
-                <Button type="button" variant="outline" onClick={closeForm}>
-                  {t('btn.cancel')}
-                </Button>
-                <Button type="submit" variant="default">
-                  {t('btn.save')}
-                </Button>
-              </div>
-            </form>
-          </CardContent>
-        </Card>
-      ) : (
+      {/* Only when it is a NEW profile: an edit renders under the card
+          it is editing, where the reader can see what is being changed. */}
+      {formOpen && editingId === null ? formCard : null}
+      {formOpen ? null : (
         <div className="flex flex-wrap justify-end gap-2">
           <input
             ref={fileRef}
