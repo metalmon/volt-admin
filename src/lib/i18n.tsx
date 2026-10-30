@@ -42,7 +42,8 @@ const ru: Dict = {
   'field.watch': 'Следить за ошибками',
   'field.watch.hint':
     'Раз в минуту проверяет журнал шлюза и показывает уведомление, даже когда окно закрыто.',
-  'watch:remote': 'Пока только для локальных профилей: удалённому нужен туннель без открытого окна.',
+  'field.watch.remoteHint':
+    'Пока включено, приложение держит SSH-туннель к этому шлюзу — даже когда окно закрыто. Открытое окно подключится к тому же туннелю.',
   'watch:password': 'Профиль с паролем наблюдать нельзя: пароль пришлось бы хранить.',
   'watch.quiet': 'Ошибок нет',
   'watch.counts': 'Ошибок: {e}, предупреждений: {w}',
@@ -51,6 +52,7 @@ const ru: Dict = {
   'watch.no-pairing': 'Не удалось получить сессию у шлюза — проверьте его в меню',
   'watch.broken': 'Наблюдение не запустилось',
   'watch.stream-lost': 'Шлюз не отвечает — поток событий потерян',
+  'watch.no-tunnel': 'Туннель не поднимается — проверьте доступ по SSH',
   'gw.run': 'Выполнить',
   'gw.telemetry': 'Включить журнал событий',
   'gw.telemetryOn': 'Журнал событий уже включён',
@@ -145,7 +147,8 @@ const en: Dict = {
   'field.watch': 'Watch for errors',
   'field.watch.hint':
     'Checks the gateway log every minute and raises a notification, with no window open.',
-  'watch:remote': 'Local profiles only for now: a remote one needs a tunnel with no window open.',
+  'field.watch.remoteHint':
+    'While this is on, the app keeps an SSH tunnel to this gateway open, window or no window. A window connecting later shares it.',
   'watch:password': 'A password profile cannot be watched: the password would have to be kept.',
   'watch.quiet': 'No errors',
   'watch.counts': '{e} error(s), {w} warning(s)',
@@ -154,6 +157,7 @@ const en: Dict = {
   'watch.no-pairing': 'Could not get a session from this gateway — check it from the menu',
   'watch.broken': 'The watcher did not start',
   'watch.stream-lost': 'The gateway is not answering — the event stream is lost',
+  'watch.no-tunnel': 'The tunnel will not come up — check SSH access',
   'gw.run': 'Run it',
   'gw.telemetry': 'Turn the event log on',
   'gw.telemetryOn': 'The event log is already on',

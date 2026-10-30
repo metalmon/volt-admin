@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::registry::{Holder, Registry};
 use crate::tunnel::Lang;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
@@ -34,6 +35,8 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 /// reconnecting costs one catch-up fetch, which is cheap enough to do on
 /// a schedule rather than wonder.
 const QUIET: Duration = Duration::from_secs(5 * 60);
+/// How long a tunnel may take to come up before it counts as refused.
+const TUNNEL_TIMEOUT: Duration = Duration::from_secs(30);
 /// What to wait before trying again, in order, then the last one forever.
 /// A gateway restarting is back in seconds; a server that is down is not.
 const LADDER: [Duration; 3] = [
@@ -387,6 +390,14 @@ pub fn sync<R: Runtime>(app: &AppHandle<R>) {
             }
         }
         app.state::<Board>().drop_profile(&id);
+        // The aborted task cannot do this itself — abort runs no async
+        // cleanup — so the holder is dropped here, which is also what
+        // takes the tunnel down when nothing else wants it.
+        let handle = app.clone();
+        let gone = id.clone();
+        tauri::async_runtime::spawn(async move {
+            release_connection(&handle, &gone).await;
+        });
         logx::log("watch", &format!("stopped watching {id}"));
     }
     for id in start {
@@ -404,24 +415,105 @@ pub fn sync<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Where this profile's gateway answers. `Local` only in this slice — a
-/// remote one needs a tunnel with no window open (see `watchable`).
-fn base_url(p: &crate::connection::Profile) -> String {
-    format!("http://127.0.0.1:{}", p.panel_port)
+/// Take or raise the connection this profile's gateway answers on, held
+/// by the watcher itself, and return the local port.
+///
+/// The SAME entry a window would use (`crate::registry`): a window that
+/// connects later JOINS this one instead of raising a second tunnel to the
+/// same host, and a window that disconnects leaves it standing because the
+/// watcher is still holding it. That is what `Holder::Monitor` was written
+/// for in phase 1.
+async fn hold_connection<R: Runtime>(
+    app: &AppHandle<R>,
+    p: &crate::connection::Profile,
+) -> Result<u16, String> {
+    let registry = app.state::<Registry>();
+    // One connect at a time, app-wide: the window's connect takes this
+    // same lock, so the two cannot both decide the entry is missing.
+    let _connecting = registry.connect_lock().await;
+    let fingerprint = p.connection_fingerprint();
+    if let Some(held) = registry.hold(&p.id, &fingerprint, Holder::Monitor).await {
+        logx::log(
+            "watch",
+            &format!("{}: joined connection on port {}", p.id, held.local_port),
+        );
+        return Ok(held.local_port);
+    }
+    // Local needs no tunnel: the gateway is already on this machine's
+    // loopback. The registry entry is still published, so a window joins
+    // it the same way.
+    if p.mode == crate::connection::ConnMode::Local {
+        registry
+            .publish(
+                &p.id,
+                None,
+                p.panel_port,
+                false,
+                &fingerprint,
+                Holder::Monitor,
+            )
+            .await;
+        return Ok(p.panel_port);
+    }
+    let lang = crate::settings::language(app);
+    // No password is ever passed: a watched profile authenticates with an
+    // agent or a key (`connection::watchable`).
+    let opened =
+        tokio::time::timeout(TUNNEL_TIMEOUT, crate::tunnel::open_tunnel(p, None, lang)).await;
+    let tun = match opened {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return Err(format!("tunnel refused ({})", e.localize(lang))),
+        Err(_) => return Err("tunnel hung".to_string()),
+    };
+    let local_port = tun.local_port;
+    let embedded = tun.is_embedded();
+    logx::log(
+        "watch",
+        &format!(
+            "{}: tunnel up on port {local_port} embedded={embedded}",
+            p.id
+        ),
+    );
+    registry
+        .publish(
+            &p.id,
+            Some(tun),
+            local_port,
+            embedded,
+            &fingerprint,
+            Holder::Monitor,
+        )
+        .await;
+    Ok(local_port)
+}
+
+/// Let go of it. A window still holding the same connection keeps it.
+async fn release_connection<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
+    if app
+        .state::<Registry>()
+        .release(profile_id, Holder::Monitor)
+        .await
+    {
+        logx::log("watch", &format!("{profile_id}: connection released"));
+    }
 }
 
 /// The token to poll with: the one that was kept, or a fresh pairing.
 async fn obtain_token<R: Runtime>(
     app: &AppHandle<R>,
     p: &crate::connection::Profile,
+    base: &str,
 ) -> Result<String, String> {
     let fingerprint = p.connection_fingerprint();
     if let Some(token) = crate::settings::watch_token(app, &p.id, &fingerprint) {
         return Ok(token);
     }
     let lang = crate::settings::language(app);
+    // `embedded = false`: a watched profile uses the system ssh — the
+    // built-in client cannot exec, and `watchable` already refuses the
+    // auth that would need one.
     let code = crate::pair::mint_code(p, None, false, lang).await?;
-    let origin = crate::pair::origin_of(&base_url(p)).ok_or("bad base url")?;
+    let origin = crate::pair::origin_of(base).ok_or("bad base url")?;
     let token = crate::pair::redeem_code(&origin, &code).await?;
     crate::settings::remember_watch_token(app, &p.id, &token, &fingerprint)?;
     Ok(token)
@@ -435,7 +527,6 @@ async fn obtain_token<R: Runtime>(
 /// both, which is what makes a dropped stream — a laptop waking, a daemon
 /// restarting — cost nothing but a few seconds of lateness.
 async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
-    let base = base_url(&p);
     let client = match reqwest::Client::builder().no_proxy().build() {
         Ok(c) => c,
         Err(e) => {
@@ -443,14 +534,9 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
             return give_up(&app, &p, Trouble::Broken);
         }
     };
-    let mut token = match obtain_token(&app, &p).await {
-        Ok(t) => t,
-        // The REASON stays out of the log and out of the UI: a failed
-        // pairing command's error is built from what the command printed,
-        // and what `get-paircode` prints is a pairing code
-        // (`docs/specs/diagnostics.md`).
-        Err(_) => return give_up(&app, &p, Trouble::NoPairing),
-    };
+    // Taken once the connection exists, not before: a remote gateway
+    // redeems its pairing code THROUGH the tunnel.
+    let mut token: Option<String> = None;
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut said: HashMap<String, Instant> = HashMap::new();
     // A revoked token is re-paired ONCE. Twice would be a watcher minting a
@@ -458,7 +544,38 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
     let mut repaired = false;
     let mut rung = 0usize;
     loop {
-        match attach(&app, &p, &client, &base, &token, &mut seen_ids, &mut said).await {
+        // The connection first: for a Local profile this is bookkeeping,
+        // for a Remote one it is the tunnel the stream rides on.
+        let base = match hold_connection(&app, &p).await {
+            Ok(port) => format!("http://127.0.0.1:{port}"),
+            Err(why) => {
+                logx::log("watch", &format!("{}: {why}", p.id));
+                if rung + 1 >= LADDER.len() {
+                    mark(&app, &p, Some(Trouble::NoTunnel));
+                }
+                rung = (rung + 1).min(LADDER.len() - 1);
+                tokio::time::sleep(LADDER[rung]).await;
+                continue;
+            }
+        };
+        let have = match &token {
+            Some(t) => t.clone(),
+            None => match obtain_token(&app, &p, &base).await {
+                Ok(t) => {
+                    token = Some(t.clone());
+                    t
+                }
+                // The REASON stays out of the log and out of the UI: a
+                // failed pairing command's error is built from what the
+                // command printed, and what `get-paircode` prints is a
+                // pairing code (`docs/specs/diagnostics.md`).
+                Err(_) => {
+                    release_connection(&app, &p.id).await;
+                    return give_up(&app, &p, Trouble::NoPairing);
+                }
+            },
+        };
+        match attach(&app, &p, &client, &base, &have, &mut seen_ids, &mut said).await {
             Ok(()) => {
                 // The stream ended or went quiet. Both are ordinary; try
                 // again from the top of the ladder.
@@ -466,17 +583,18 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
             }
             Err(Attach::Unauthorized) => {
                 if repaired {
+                    release_connection(&app, &p.id).await;
                     return give_up(&app, &p, Trouble::TokenRefused);
                 }
                 repaired = true;
                 crate::settings::forget_watch_token(&app, &p.id);
-                match obtain_token(&app, &p).await {
-                    Ok(t) => token = t,
-                    Err(_) => return give_up(&app, &p, Trouble::NoPairing),
-                }
+                token = None; // minted again on the next turn of the loop
                 continue;
             }
-            Err(Attach::NoLog) => return give_up(&app, &p, Trouble::NoLog),
+            Err(Attach::NoLog) => {
+                release_connection(&app, &p.id).await;
+                return give_up(&app, &p, Trouble::NoLog);
+            }
             Err(Attach::Unreachable(why)) => {
                 logx::log("watch", &format!("{}: {why}", p.id));
                 // Only once the whole ladder has been walked: a gateway
@@ -761,6 +879,9 @@ enum Trouble {
     /// The event stream will not stay up. Not fatal: the watcher keeps
     /// trying, and the card stops saying it the moment one connects.
     StreamLost,
+    /// The tunnel will not come up at all. Same shape: kept trying, said
+    /// out loud, cleared when it does.
+    NoTunnel,
     /// It refuses the pairing we hold, twice.
     TokenRefused,
     /// We could not obtain a session at all.
@@ -775,6 +896,7 @@ impl Trouble {
         match self {
             Self::NoLog => "no-log",
             Self::StreamLost => "stream-lost",
+            Self::NoTunnel => "no-tunnel",
             Self::TokenRefused => "token-refused",
             Self::NoPairing => "no-pairing",
             Self::Broken => "broken",

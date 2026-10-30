@@ -74,18 +74,13 @@ pub struct Profile {
 
 /// May this profile be watched at all?
 ///
-/// `Err` is `"watch:remote"` or `"watch:password"` — the UI turns those
-/// into its own sentences, like every other validation error here.
+/// `Err` is `"watch:password"` — the UI turns it into its own sentence,
+/// like every other validation error here.
 pub fn watchable(p: &Profile) -> Result<(), String> {
-    // A watcher polls with no window open. A remote gateway is reachable
-    // only through a tunnel somebody is holding, and the pool that would
-    // hold one is the next slice of this feature.
-    if p.mode == ConnMode::Remote {
-        return Err("watch:remote".into());
-    }
-    // And a password profile would mean keeping the password for as long as
-    // the app runs — which is exactly what this app refuses to do (see the
-    // module docs).
+    // A password profile would mean keeping the password for as long as the
+    // app runs — which is exactly what this app refuses to do (see the
+    // module docs). A remote profile is otherwise fine: the watcher holds
+    // its own tunnel now (`crate::watch`).
     if p.auth == AuthMethod::Password {
         return Err("watch:password".into());
     }
@@ -265,9 +260,24 @@ mod tests {
         assert_eq!(watchable(&p), Ok(()));
         p.auth = AuthMethod::Password;
         assert_eq!(watchable(&p), Err("watch:password".to_string()));
-        p.auth = AuthMethod::Agent;
+    }
+
+    #[test]
+    fn a_remote_profile_with_a_key_is_watchable() {
+        // The watcher holds the tunnel itself now, so a remote gateway is
+        // watchable — as long as nothing has to be remembered to reach it.
+        let mut p = valid();
         p.mode = ConnMode::Remote;
-        assert_eq!(watchable(&p), Err("watch:remote".to_string()));
+        p.auth = AuthMethod::Agent;
+        assert_eq!(watchable(&p), Ok(()));
+        p.auth = AuthMethod::KeyFile;
+        assert_eq!(watchable(&p), Ok(()));
+        p.auth = AuthMethod::Password;
+        assert_eq!(
+            watchable(&p),
+            Err("watch:password".to_string()),
+            "a password would have to be kept for as long as the app runs"
+        );
     }
 
     #[test]
@@ -277,8 +287,9 @@ mod tests {
         p.mode = ConnMode::Remote;
         p.host = "h".into();
         p.user = "u".into();
-        assert_eq!(p.validate(), Err("watch:remote".to_string()));
-        p.mode = ConnMode::Local;
+        p.auth = AuthMethod::Password;
+        assert_eq!(p.validate(), Err("watch:password".to_string()));
+        p.auth = AuthMethod::Agent;
         assert_eq!(p.validate(), Ok(()));
     }
 

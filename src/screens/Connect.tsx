@@ -495,7 +495,7 @@ export default function Connect() {
       // already ticked: the box is disabled, but the draft kept the tick,
       // and Rust would refuse the save. Dropping it here is the honest
       // reading — the checkbox they can see is not checked.
-      watch: draft.watch && draft.mode === 'local' && draft.auth !== 'password',
+      watch: draft.watch && draft.auth !== 'password',
     }
     try {
       await invoke('save_profile', { profile })
@@ -1115,7 +1115,7 @@ ${t('gw.warn.noResume')}`
                     style={{ accentColor: 'var(--color-brand)' }}
                     className="size-4"
                     checked={draft.watch}
-                    disabled={draft.mode === 'remote' || draft.auth === 'password'}
+                    disabled={draft.auth === 'password'}
                     onChange={(e) => {
                       const on = e.currentTarget.checked
                       setDraft((d) => ({ ...d, watch: on }))
@@ -1124,10 +1124,10 @@ ${t('gw.warn.noResume')}`
                   {t('field.watch')}
                 </label>
                 <p className="text-xs text-muted-foreground">
-                  {draft.mode === 'remote'
-                    ? t('watch:remote')
-                    : draft.auth === 'password'
-                      ? t('watch:password')
+                  {draft.auth === 'password'
+                    ? t('watch:password')
+                    : draft.mode === 'remote'
+                      ? t('field.watch.remoteHint')
                       : t('field.watch.hint')}
                 </p>
               </div>
