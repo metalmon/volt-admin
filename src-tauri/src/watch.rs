@@ -69,12 +69,6 @@ pub struct Event {
     pub id: String,
     pub severity: u8,
     pub message: String,
-    /// `service.name` — on the wire `service` is an OBJECT
-    /// (`{"name": "zeroclaw", "version": "0.8.7"}`). A fixture here once
-    /// assumed a string, and the first live poll answered
-    /// "invalid type: map, expected a string" — for the whole page, not
-    /// for that field. Hence `read_event` below.
-    pub service: String,
 }
 
 /// Read one event out of whatever arrived.
@@ -99,12 +93,6 @@ fn read_event(v: &serde_json::Value) -> Event {
             .unwrap_or(0)
             .min(u8::MAX as u64) as u8,
         message: text("/message"),
-        // Both shapes: the object voltd sends, and a bare string if it
-        // ever sends one.
-        service: match v.get("service") {
-            Some(serde_json::Value::String(name)) => name.clone(),
-            _ => text("/service/name"),
-        },
     }
 }
 
@@ -877,11 +865,12 @@ fn announce<R: Runtime>(
     let title = format!("{profile_name}: {count}");
     // The BODY is the gateway's own message — the thing the administrator
     // needs — and it still never reaches our log (see `report`).
-    let body = if newest.service.is_empty() {
-        newest.message.clone()
-    } else {
-        format!("{}: {}", newest.service, newest.message)
-    };
+    //
+    // WITHOUT the service name. voltd puts `service.name = "zeroclaw"` on
+    // every event it logs, so prefixing it added nothing to tell events
+    // apart and put the upstream project's name in front of the customer
+    // on every toast. The title already says which gateway this is.
+    let body = newest.message.clone();
     match toast(app, &title, &body, p_id) {
         // Counts only, never the text — but DO say that it went out. The
         // first build logged nothing on success, so "no notification
@@ -1110,8 +1099,9 @@ mod tests {
         assert_eq!(poll.events[0].message, "tool timed out");
         // The shape is the LIVE one, copied off a running gateway: `event`
         // and `service` are objects, `schema_version` a number. A fixture
-        // invented from a field list parsed here and failed there.
-        assert_eq!(poll.events[0].service, "zeroclaw");
+        // invented from a field list parsed here and failed there — which
+        // is why `read_event` reads field by field and this fixture is a
+        // real line.
         assert!(poll.events[0].is_error(), "severity 17 is an error");
         assert!(!poll.events[1].is_error(), "severity 13 is a warning");
         assert!(poll.persistence_enabled);
@@ -1133,9 +1123,7 @@ mod tests {
         let poll = parse_poll(odd).expect("the page parses");
         assert_eq!(poll.events.len(), 3);
         assert_eq!(poll.events[0].message, "real trouble");
-        assert_eq!(poll.events[0].service, "zeroclaw");
         assert!(poll.events[1].message.is_empty(), "unreadable, not fatal");
-        assert_eq!(poll.events[1].service, "plain", "a string shape works too");
         assert_eq!(
             poll.events[2].severity, 0,
             "unreadable severity is not an error"
@@ -1182,7 +1170,6 @@ mod tests {
             id: id.into(),
             severity: 13,
             message: "Cron job has no single owning agent".into(),
-            service: String::new(),
         };
         let now = Instant::now();
         let mut said = HashMap::new();
@@ -1306,7 +1293,6 @@ data: {\"b\":2}
                 id: format!("id-{n}"),
                 severity: 13,
                 message: String::new(),
-                service: String::new(),
             };
             remember_seen(&mut seen, std::slice::from_ref(&e));
         }
