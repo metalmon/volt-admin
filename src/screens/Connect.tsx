@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -42,6 +43,19 @@ export interface Profile {
   keyPath: string | null
   principal: string | null
   paircodeCommand: string | null
+  /** Poll this gateway's log for problems with no window open — see
+   *  `src-tauri/src/watch.rs`. Local profiles only, never password auth. */
+  watch: boolean
+}
+
+/** What one watched profile has seen, from the Rust side's board. */
+export interface WatchStatus {
+  profileId: string
+  name: string
+  errors: number
+  warnings: number
+  /** Why it is not being watched after all: "no-log", "token-refused", … */
+  trouble: string | null
 }
 
 const DEFAULT_PANEL_PORT = 42617
@@ -61,6 +75,7 @@ const emptyDraft = (): Draft => ({
   keyPath: null,
   principal: null,
   paircodeCommand: null,
+  watch: false,
 })
 
 // i18n keys for the enum display labels. The `AuthMethod` / `ConnMode` values
@@ -203,6 +218,10 @@ export default function Connect() {
    *  anything. `undefined` = not asked yet or the ask failed — nothing is
    *  greyed out on a guess. */
   const [security, setSecurity] = useState<Record<string, GatewayFlags>>({})
+  // What the watchers have seen. Filled on mount (a window opened after the
+  // watcher had been running misses its events) and kept up by the `watch`
+  // event the Rust side emits.
+  const [watched, setWatched] = useState<Record<string, WatchStatus>>({})
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -410,6 +429,18 @@ export default function Connect() {
     }
   }
 
+  useEffect(() => {
+    void invoke<WatchStatus[]>('watch_board')
+      .then((board) => setWatched(Object.fromEntries(board.map((s) => [s.profileId, s]))))
+      .catch(() => {})
+    const unlisten = listen<WatchStatus>('watch', (e) =>
+      setWatched((m) => ({ ...m, [e.payload.profileId]: e.payload })),
+    )
+    return () => {
+      void unlisten.then((off) => off())
+    }
+  }, [])
+
   const closeForm = () => {
     setFormOpen(false)
     setDraft(emptyDraft())
@@ -434,7 +465,15 @@ export default function Connect() {
       setError(t('err.nameRequired'))
       return
     }
-    const profile: Profile = { id: editingId ?? crypto.randomUUID(), ...draft }
+    const profile: Profile = {
+      id: editingId ?? crypto.randomUUID(),
+      ...draft,
+      // A profile switched to remote or to password auth while the box was
+      // already ticked: the box is disabled, but the draft kept the tick,
+      // and Rust would refuse the save. Dropping it here is the honest
+      // reading — the checkbox they can see is not checked.
+      watch: draft.watch && draft.mode === 'local' && draft.auth !== 'password',
+    }
     try {
       await invoke('save_profile', { profile })
       closeForm()
@@ -551,6 +590,31 @@ export default function Connect() {
                     <span className="truncate text-xs text-muted-foreground">
                       {summaryOf(p, t)}
                     </span>
+                    {/* Only for a watched profile, and only when there is
+                        something to say — a quiet gateway says «Ошибок нет»,
+                        never nothing at all, because silence is also what a
+                        broken watcher looks like. */}
+                    {p.watch && (
+                      <span
+                        className={cn(
+                          'truncate text-xs',
+                          watched[p.id]?.trouble
+                            ? 'text-destructive'
+                            : watched[p.id]?.errors
+                              ? 'text-destructive'
+                              : 'text-muted-foreground',
+                        )}
+                      >
+                        {watched[p.id]?.trouble
+                          ? t(`watch.${watched[p.id].trouble}`)
+                          : watched[p.id] && (watched[p.id].errors || watched[p.id].warnings)
+                            ? t('watch.counts', {
+                                e: watched[p.id].errors,
+                                w: watched[p.id].warnings,
+                              })
+                            : t('watch.quiet')}
+                      </span>
+                    )}
                   </div>
                   {/* Fluent: secondary/dismissive action on the left, primary
                       (positive) action rightmost. */}
@@ -1010,6 +1074,31 @@ ${t('gw.warn.noResume')}`
                   }}
                 />
                 <p className="text-xs text-muted-foreground">{t('field.paircodeCommand.hint')}</p>
+              </div>
+
+              {/* Monitoring is opt-in per profile: nothing is watched
+                  because it exists (`docs/specs/gateway-monitoring.md`). */}
+              <div className="flex flex-col gap-1.5">
+                <label className="flex items-center gap-2 text-sm text-foreground">
+                  <input
+                    type="checkbox"
+                    className="size-4 accent-[var(--primary)]"
+                    checked={draft.watch}
+                    disabled={draft.mode === 'remote' || draft.auth === 'password'}
+                    onChange={(e) => {
+                      const on = e.currentTarget.checked
+                      setDraft((d) => ({ ...d, watch: on }))
+                    }}
+                  />
+                  {t('field.watch')}
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {draft.mode === 'remote'
+                    ? t('watch:remote')
+                    : draft.auth === 'password'
+                      ? t('watch:password')
+                      : t('field.watch.hint')}
+                </p>
               </div>
 
               {/* Fluent: form action row lives at the bottom-right, primary
