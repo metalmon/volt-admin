@@ -38,9 +38,12 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 const SEEN_MAX: usize = 1000;
 
 /// One event, as the gateway recorded it.
+///
+/// No `id`: the gateway gives every occurrence its own, and the same
+/// complaint repeating every 15 seconds arrives with 38 of them. What
+/// identifies a PROBLEM here is the message (see `problem`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Event {
-    pub id: String,
     #[serde(rename = "severity_number", default)]
     pub severity: u8,
     #[serde(default)]
@@ -118,8 +121,14 @@ pub fn parse_poll(json: &str) -> Result<Poll, String> {
 /// The URL of the next poll. Without a cursor it asks for the newest page,
 /// which is also what a restarted daemon gets.
 pub fn logs_url(base: &str, cursor: Option<&Cursor>) -> String {
+    // hide_internal=FALSE, and that is the whole point. Tried it the other
+    // way against a live gateway: a cron job that failed logged
+    // "Scheduler job '' failed" as a Warn of category `internal`, which
+    // `hide_internal=true` drops — a watcher that hides the daemon's own
+    // problems watches nothing. The noise that flag exists for (the same
+    // warning every 15 seconds) is handled below, by message.
     let mut url =
-        format!("{base}/api/logs?severity_min={SEVERITY_MIN}&hide_internal=true&limit={LIMIT}");
+        format!("{base}/api/logs?severity_min={SEVERITY_MIN}&hide_internal=false&limit={LIMIT}");
     if let Some(c) = cursor {
         url.push_str(&format!(
             "&until_segment_cursor={}&until_line_offset={}",
@@ -151,11 +160,23 @@ pub fn fresh_start(prev: Option<&str>, now: Option<&str>) -> bool {
     matches!((prev, now), (Some(a), Some(b)) if a != b)
 }
 
-/// The events not seen before, in the order they arrived.
+/// What makes two events the same PROBLEM: the text, not the id.
+///
+/// The same complaint arrives every 15 seconds with a fresh id — 38 of 40
+/// events in one real poll were one misconfiguration repeating. By id that
+/// is 38 new problems; by message it is one, which is also what a person
+/// would say looking at the list.
+fn problem(e: &Event) -> String {
+    format!("{}|{}", e.severity, e.message)
+}
+
+/// The problems not seen before, in the order they arrived — one per
+/// distinct message, however many times it repeated inside this poll.
 pub fn unseen(events: &[Event], seen: &HashSet<String>) -> Vec<Event> {
+    let mut within = HashSet::new();
     events
         .iter()
-        .filter(|e| !seen.contains(&e.id))
+        .filter(|e| !seen.contains(&problem(e)) && within.insert(problem(e)))
         .cloned()
         .collect()
 }
@@ -172,7 +193,7 @@ pub fn remember_seen(seen: &mut HashSet<String>, events: &[Event]) {
                 seen.remove(&victim);
             }
         }
-        seen.insert(e.id.clone());
+        seen.insert(problem(e));
     }
 }
 
@@ -513,7 +534,6 @@ mod tests {
     fn a_real_answer_parses_into_events_and_a_cursor() {
         let poll = parse_poll(ANSWER).expect("parses");
         assert_eq!(poll.events.len(), 2);
-        assert_eq!(poll.events[0].id, "e0ef98cd");
         assert_eq!(poll.events[0].message, "tool timed out");
         assert_eq!(poll.events[0].service, "voltd");
         assert!(poll.events[0].is_error(), "severity 17 is an error");
@@ -576,14 +596,48 @@ mod tests {
     }
 
     #[test]
+    fn one_complaint_repeated_is_one_problem() {
+        // What a real gateway does: the same misconfiguration every 15
+        // seconds, a fresh id each time. By id that is 38 new problems in
+        // one poll; it is one.
+        let same = || Event {
+            severity: 13,
+            message: "Cron job has no single owning agent".into(),
+            service: "voltd".into(),
+        };
+        let events = vec![same(), same(), same()];
+        let mut seen = std::collections::HashSet::new();
+        let fresh = unseen(&events, &seen);
+        assert_eq!(fresh.len(), 1, "one message, one problem");
+        remember_seen(&mut seen, &events);
+        assert!(unseen(&events, &seen).is_empty(), "and not again next poll");
+        // A different message is a different problem, same severity or not.
+        let other = Event {
+            message: "Scheduler job failed".into(),
+            ..same()
+        };
+        assert_eq!(unseen(&[other], &seen).len(), 1);
+    }
+
+    #[test]
+    fn the_internal_events_are_not_hidden() {
+        // A cron job that failed logs a Warn of category `internal`; a
+        // watcher that asks the gateway to hide those watches nothing.
+        assert!(
+            logs_url("http://h", None).contains("hide_internal=false"),
+            "{}",
+            logs_url("http://h", None)
+        );
+    }
+
+    #[test]
     fn remembering_is_bounded() {
         // A gateway that logs forever must not grow this process forever.
         let mut seen = std::collections::HashSet::new();
         for n in 0..1500 {
             let e = Event {
-                id: format!("id-{n}"),
                 severity: 13,
-                message: String::new(),
+                message: format!("problem {n}"),
                 service: String::new(),
             };
             remember_seen(&mut seen, std::slice::from_ref(&e));
@@ -608,7 +662,7 @@ mod tests {
         let first = logs_url("http://127.0.0.1:42617", None);
         assert_eq!(
             first,
-            "http://127.0.0.1:42617/api/logs?severity_min=13&hide_internal=true&limit=200"
+            "http://127.0.0.1:42617/api/logs?severity_min=13&hide_internal=false&limit=200"
         );
         let next = logs_url(
             "http://127.0.0.1:42617",

@@ -61,9 +61,19 @@ event carrying `id`, `@timestamp`, `severity_number`, `severity_text`,
   paginated query over the persisted JSONL event store, with
   `severity_min`, `hide_internal`, `limit` and a cursor
   (`until_segment_cursor` + `until_line_offset`).
-- The events are structured (`zeroclaw_log::LogEvent`): **an `id`**, a
-  `Severity`, an `EventCategory`, an `EventOutcome`. The id is what makes
-  "notify once per problem" exact rather than a hash of a rendered line.
+- The events are structured (`zeroclaw_log::LogEvent`): an `id`, a
+  `Severity`, an `EventCategory`, an `EventOutcome`.
+- **The id is per OCCURRENCE, not per problem**, which the first live test
+  settled: one misconfiguration repeating every 15 seconds filled 38 of 40
+  events in a single poll, each with its own id. What a person would call
+  one problem is one MESSAGE, so that is what the watcher deduplicates by.
+- **`hide_internal` must be false.** It was `true` to keep that noise out —
+  until a deliberately failed cron job logged `Scheduler job '' failed` as a
+  Warn of category `internal`, which the flag drops. A watcher that hides
+  the daemon's own problems watches nothing; the noise the flag existed for
+  is handled by the message rule above.
+- **Warnings are worth saying, once.** That failure is a Warn, not an
+  Error — so notifying only on Error would have said nothing at all.
 - The store is bounded by the daemon's own config
   (`[observability] log_persistence_max_entries`), and a daemon with
   persistence off answers `persistence_enabled: false` instead of serving a

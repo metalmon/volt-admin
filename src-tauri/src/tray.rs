@@ -106,6 +106,21 @@ pub fn errors_phrase(lang: Lang, errors: usize) -> String {
     }
 }
 
+/// "3 предупреждения" / "3 warnings" — shared with the notification, like
+/// `errors_phrase`.
+pub fn warnings_phrase(lang: Lang, warnings: usize) -> String {
+    match lang {
+        Lang::Ru => format!(
+            "{warnings} {}",
+            plural_ru(
+                warnings,
+                ("предупреждение", "предупреждения", "предупреждений")
+            )
+        ),
+        Lang::En => format!("{warnings} warning{}", if warnings == 1 { "" } else { "s" }),
+    }
+}
+
 /// What the tray says it has seen. The launcher's own name when there is
 /// nothing to report — quiet is the normal state, and the tray must not
 /// look alarmed in it.
@@ -118,16 +133,7 @@ pub fn watch_tooltip(lang: Lang, errors: usize, warnings: usize) -> String {
         parts.push(errors_phrase(lang, errors));
     }
     if warnings > 0 {
-        parts.push(match lang {
-            Lang::Ru => format!(
-                "{warnings} {}",
-                plural_ru(
-                    warnings,
-                    ("предупреждение", "предупреждения", "предупреждений")
-                )
-            ),
-            Lang::En => format!("{warnings} warning{}", if warnings == 1 { "" } else { "s" }),
-        });
+        parts.push(warnings_phrase(lang, warnings));
     }
     format!("{} — {}", windows::launcher_title(lang), parts.join(", "))
 }
