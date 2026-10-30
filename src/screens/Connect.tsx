@@ -560,12 +560,14 @@ export default function Connect() {
   /** The profile form. Rendered under the card being edited, or at the
    *  bottom when it is a new profile — a form far from its card leaves
    *  the reader guessing which profile they are changing. */
-  const formCard = formOpen ? (
-        <Card className="gap-4 py-5">
+  const formBody = (alone: boolean) =>
+    formOpen ? (
           <CardContent className="flex flex-col gap-4 px-5">
-            <h2 className="font-heading text-lg text-foreground">
-              {editingId ? t('form.editTitle') : t('form.newTitle')}
-            </h2>
+            {/* Under a card, the card already says which profile this is;
+                the heading would only repeat it. */}
+            {alone ? (
+              <h2 className="font-heading text-lg text-foreground">{t('form.newTitle')}</h2>
+            ) : null}
             <form
               className="flex flex-col gap-4"
               onSubmit={(e) => {
@@ -797,8 +799,10 @@ export default function Connect() {
               </div>
             </form>
           </CardContent>
-        </Card>
-  ) : null
+    ) : null
+
+  /** A NEW profile has no card to sit under, so it gets one of its own. */
+  const formCard = formOpen ? <Card className="gap-4 py-5">{formBody(true)}</Card> : null
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-10">
@@ -1043,8 +1047,13 @@ ${t('gw.warn.noResume')}`
                     </form>
                   </CardFooter>
                 )}
+                {/* One card, two parts: the profile and what is being
+                    changed about it. A second card below made the form look
+                    like it belonged to no profile in particular. */}
+                {editingId === p.id ? (
+                  <div className="mt-1 border-t border-border pt-4">{formBody(false)}</div>
+                ) : null}
               </Card>
-              {editingId === p.id ? formCard : null}
             </li>
           ))}
         </ul>
