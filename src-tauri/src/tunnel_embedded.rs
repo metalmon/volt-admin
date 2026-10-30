@@ -295,6 +295,7 @@ mod tests {
             key_path: None,
             principal: None,
             paircode_command: None,
+            watch: false,
         }
     }
 

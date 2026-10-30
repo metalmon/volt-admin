@@ -12,6 +12,12 @@ use tauri_plugin_store::StoreExt;
 use crate::tunnel::Lang;
 
 const STORE_PATH: &str = "settings.json";
+/// The watcher's session tokens, profile id → token. A FILE OF ITS OWN, not
+/// a key in the settings: it is the only secret this app keeps on disk, and
+/// keeping it apart is what makes "never printed, never exported, deleted
+/// with the profile" something a reader can check rather than trust
+/// (`docs/specs/gateway-monitoring.md`).
+const WATCH_STORE: &str = "watch.json";
 const LANG_KEY: &str = "lang";
 /// Profile id → the `connection_fingerprint` of the gateway this app has
 /// already paired with. NOT a secret: it says that a pairing happened, not
@@ -125,6 +131,40 @@ pub fn set_language<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Result<(), St
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     store.set(LANG_KEY, serde_json::Value::from(lang.code()));
     store.save().map_err(|e| e.to_string())
+}
+
+/// The session token the watcher polls this profile's gateway with, if one
+/// was kept.
+///
+/// Unused until the watcher itself lands (Task 3 of
+/// `docs/superpowers/plans/2026-10-30-gateway-watch.md`).
+#[allow(dead_code)]
+pub fn watch_token<R: Runtime>(app: &AppHandle<R>, profile_id: &str) -> Option<String> {
+    let store = app.store(WATCH_STORE).ok()?;
+    let token = store.get(profile_id)?;
+    token.as_str().map(str::to_string).filter(|t| !t.is_empty())
+}
+
+/// Keep a token for a watched profile. Nothing else writes this file.
+#[allow(dead_code)]
+pub fn remember_watch_token<R: Runtime>(
+    app: &AppHandle<R>,
+    profile_id: &str,
+    token: &str,
+) -> Result<(), String> {
+    let store = app.store(WATCH_STORE).map_err(|e| e.to_string())?;
+    store.set(profile_id, serde_json::Value::String(token.to_string()));
+    store.save().map_err(|e| e.to_string())
+}
+
+/// Forget it — the profile stopped being watched, or stopped existing.
+pub fn forget_watch_token<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
+    let Ok(store) = app.store(WATCH_STORE) else {
+        return;
+    };
+    if store.delete(profile_id) {
+        let _ = store.save();
+    }
 }
 
 #[cfg(test)]

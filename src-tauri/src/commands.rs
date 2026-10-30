@@ -359,6 +359,9 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     // Its pairing marker goes too, or re-creating the profile later would
     // look already paired to a gateway that has forgotten this app.
     crate::settings::forget_paired(&app, &id);
+    // And the watcher's session token: a deleted profile leaves no secret
+    // behind (`docs/specs/gateway-monitoring.md`).
+    crate::settings::forget_watch_token(&app, &id);
     let mut profiles = load_profiles(&app)?;
     profiles.retain(|p| p.id != id);
     persist_profiles(&app, &profiles)

@@ -75,6 +75,10 @@ pub fn parse(text: &str) -> Result<Profile, String> {
         key_path: doc.key_path,
         principal: doc.principal,
         paircode_command: doc.paircode_command,
+        // NEVER from the document. Watching polls a gateway on a timer with
+        // no window open; that is a decision the person importing makes
+        // afterwards, not one the file they were sent can make for them.
+        watch: false,
     };
     profile.validate()?;
     Ok(profile)
@@ -83,6 +87,16 @@ pub fn parse(text: &str) -> Result<Profile, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_imported_document_never_arrives_already_watched() {
+        let doc = FULL.replace(
+            "\"name\": \"VoltSSH\"",
+            "\"name\": \"VoltSSH\", \"watch\": true",
+        );
+        let p = parse(&doc).expect("parses");
+        assert!(!p.watch, "a document must not switch monitoring on");
+    }
 
     const FULL: &str = r#"{
         "id": "pilot-backend",
