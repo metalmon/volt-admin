@@ -26,11 +26,21 @@ pub const SEVERITY_MIN: u8 = 13;
 pub const SEVERITY_ERROR: u8 = 17;
 /// How many events one poll may bring back.
 const LIMIT: u16 = 200;
-/// How long between polls. Slow on purpose: this is "tell me within a
-/// minute", not a dashboard.
-const EVERY: Duration = Duration::from_secs(60);
-/// How long one poll may take before it is a failure.
+/// How long the catch-up fetch may take. The STREAM gets no timeout at
+/// all — one that expires every 15 seconds is a poll with extra steps.
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a silent stream is believed. The gateway sends no heartbeat,
+/// so a quiet gateway and a dead connection are the same thing from here;
+/// reconnecting costs one catch-up fetch, which is cheap enough to do on
+/// a schedule rather than wonder.
+const QUIET: Duration = Duration::from_secs(5 * 60);
+/// What to wait before trying again, in order, then the last one forever.
+/// A gateway restarting is back in seconds; a server that is down is not.
+const LADDER: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+    Duration::from_secs(5 * 60),
+];
 /// How long a problem stays said. The same complaint repeats every 15
 /// seconds; a failure that comes back after this is news again.
 const SAY_AGAIN: Duration = Duration::from_secs(30 * 60);
@@ -418,6 +428,12 @@ async fn obtain_token<R: Runtime>(
 }
 
 /// One watched gateway, until the watcher is stopped or gives up.
+///
+/// Catch up, then listen. The catch-up answers "what is wrong right now",
+/// including anything that happened while this was disconnected; the
+/// stream answers "what is happening" in seconds. Every reconnection does
+/// both, which is what makes a dropped stream — a laptop waking, a daemon
+/// restarting — cost nothing but a few seconds of lateness.
 async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
     let base = base_url(&p);
     let client = match reqwest::Client::builder().no_proxy().build() {
@@ -440,15 +456,15 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
     // A revoked token is re-paired ONCE. Twice would be a watcher minting a
     // pairing code every minute against a gateway that keeps refusing it.
     let mut repaired = false;
+    let mut rung = 0usize;
     loop {
-        let answer = client
-            .get(logs_url(&base))
-            .bearer_auth(&token)
-            .timeout(TIMEOUT)
-            .send()
-            .await;
-        match answer {
-            Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
+        match attach(&app, &p, &client, &base, &token, &mut seen_ids, &mut said).await {
+            Ok(()) => {
+                // The stream ended or went quiet. Both are ordinary; try
+                // again from the top of the ladder.
+                rung = 0;
+            }
+            Err(Attach::Unauthorized) => {
                 if repaired {
                     return give_up(&app, &p, Trouble::TokenRefused);
                 }
@@ -460,44 +476,129 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
                 }
                 continue;
             }
-            Ok(r) => {
-                match r
-                    .text()
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|body| parse_poll(&body))
-                {
-                    Ok(poll) => {
-                        if !poll.persistence_enabled {
-                            // Nothing to watch here, and silence must never
-                            // be shown as health.
-                            return give_up(&app, &p, Trouble::NoLog);
-                        }
-                        if poll.incomplete {
-                            // The gateway dropped part of its own window
-                            // (retention): some events never reach anyone,
-                            // and that is worth knowing when reading the log.
-                            logx::log("watch", &format!("{}: window incomplete", p.id));
-                        }
-                        let now = Instant::now();
-                        let occurrences = new_occurrences(&poll.events, &seen_ids);
-                        remember_seen(&mut seen_ids, &poll.events);
-                        let fresh = due_problems(&occurrences, &said, now, SAY_AGAIN);
-                        for e in &fresh {
-                            said.insert(problem(e), now);
-                        }
-                        said.retain(|_, last| now.duration_since(*last) < SAY_AGAIN);
-                        report(&app, &p, &fresh);
-                    }
-                    // A gateway that is down, or answering something else:
-                    // try again next minute. Not a reason to stop watching.
-                    Err(e) => logx::log("watch", &format!("{}: poll unreadable ({e})", p.id)),
+            Err(Attach::NoLog) => return give_up(&app, &p, Trouble::NoLog),
+            Err(Attach::Unreachable(why)) => {
+                logx::log("watch", &format!("{}: {why}", p.id));
+                // Only once the whole ladder has been walked: a gateway
+                // that restarts is back before the second rung.
+                if rung + 1 >= LADDER.len() {
+                    mark(&app, &p, Some(Trouble::StreamLost));
+                }
+                rung = (rung + 1).min(LADDER.len() - 1);
+            }
+        }
+        tokio::time::sleep(LADDER[rung]).await;
+    }
+}
+
+/// Why one attempt ended.
+enum Attach {
+    /// The gateway refused the token — it was revoked, or it never was one.
+    Unauthorized,
+    /// It keeps no log. Nothing to watch here, ever, until someone changes
+    /// that — and silence must not be shown as health.
+    NoLog,
+    /// It did not answer, or stopped answering. Ordinary; try again.
+    Unreachable(String),
+}
+
+/// One catch-up and one stream, until the stream ends.
+async fn attach<R: Runtime>(
+    app: &AppHandle<R>,
+    p: &crate::connection::Profile,
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    seen_ids: &mut HashSet<String>,
+    said: &mut HashMap<String, Instant>,
+) -> Result<(), Attach> {
+    // 1. What is wrong right now, including what was missed.
+    let answer = client
+        .get(logs_url(base))
+        .bearer_auth(token)
+        .timeout(TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| Attach::Unreachable(format!("catch-up failed ({e})")))?;
+    if answer.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Attach::Unauthorized);
+    }
+    let body = answer
+        .text()
+        .await
+        .map_err(|e| Attach::Unreachable(format!("catch-up unreadable ({e})")))?;
+    let poll =
+        parse_poll(&body).map_err(|e| Attach::Unreachable(format!("catch-up unreadable ({e})")))?;
+    if !poll.persistence_enabled {
+        return Err(Attach::NoLog);
+    }
+    if poll.incomplete {
+        // The gateway dropped part of its own window (retention): some
+        // events never reach anyone, and that is worth knowing when
+        // reading the log.
+        logx::log("watch", &format!("{}: window incomplete", p.id));
+    }
+    digest(app, p, &poll.events, seen_ids, said);
+
+    // 2. What is happening, for as long as it keeps happening.
+    let stream = client
+        .get(events_url(base))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| Attach::Unreachable(format!("stream refused ({e})")))?;
+    if stream.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Attach::Unauthorized);
+    }
+    if !stream.status().is_success() {
+        return Err(Attach::Unreachable(format!("stream {}", stream.status())));
+    }
+    mark(app, p, None);
+    let mut stream = stream;
+    let mut frames = Frames::new();
+    loop {
+        // The silence floor, not a request timeout: there is no heartbeat
+        // to tell a quiet gateway from a dead connection.
+        match tokio::time::timeout(QUIET, stream.chunk()).await {
+            Ok(Ok(Some(bytes))) => {
+                let text = String::from_utf8_lossy(&bytes);
+                let events: Vec<Event> = frames
+                    .feed(&text)
+                    .iter()
+                    .filter_map(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                    .map(|v| read_event(&v))
+                    // The stream carries everything; `severity_min` is
+                    // ignored on it, so the floor is applied here.
+                    .filter(|e| e.severity >= SEVERITY_MIN)
+                    .collect();
+                if !events.is_empty() {
+                    digest(app, p, &events, seen_ids, said);
                 }
             }
-            Err(e) => logx::log("watch", &format!("{}: poll failed ({e})", p.id)),
+            // Ended, failed, or said nothing for five minutes: all three
+            // mean "reconnect and catch up", which costs one fetch.
+            _ => return Ok(()),
         }
-        tokio::time::sleep(EVERY).await;
     }
+}
+
+/// Decide what in these events is new, what is worth saying, and say it.
+fn digest<R: Runtime>(
+    app: &AppHandle<R>,
+    p: &crate::connection::Profile,
+    events: &[Event],
+    seen_ids: &mut HashSet<String>,
+    said: &mut HashMap<String, Instant>,
+) {
+    let now = Instant::now();
+    let occurrences = new_occurrences(events, seen_ids);
+    remember_seen(seen_ids, events);
+    let fresh = due_problems(&occurrences, said, now, SAY_AGAIN);
+    for e in &fresh {
+        said.insert(problem(e), now);
+    }
+    said.retain(|_, last| now.duration_since(*last) < SAY_AGAIN);
+    report(app, p, &fresh);
 }
 
 /// Put what this poll found on the board and tell any open window.
@@ -655,8 +756,11 @@ fn toast<R: Runtime>(
 /// from what `get-paircode` printed.
 #[derive(Debug, Clone, Copy)]
 enum Trouble {
-    /// The gateway keeps no log — there is nothing to poll.
+    /// The gateway keeps no log — there is nothing to watch.
     NoLog,
+    /// The event stream will not stay up. Not fatal: the watcher keeps
+    /// trying, and the card stops saying it the moment one connects.
+    StreamLost,
     /// It refuses the pairing we hold, twice.
     TokenRefused,
     /// We could not obtain a session at all.
@@ -670,6 +774,7 @@ impl Trouble {
     fn key(self) -> &'static str {
         match self {
             Self::NoLog => "no-log",
+            Self::StreamLost => "stream-lost",
             Self::TokenRefused => "token-refused",
             Self::NoPairing => "no-pairing",
             Self::Broken => "broken",
@@ -677,20 +782,42 @@ impl Trouble {
     }
 }
 
-/// Stop watching this profile, with a reason the card can show. The task
-/// ends here: whatever is wrong needs a person, not another poll.
-fn give_up<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, trouble: Trouble) {
-    let trouble = trouble.key();
-    logx::log("watch", &format!("{}: gave up ({trouble})", p.id));
+/// Say what is wrong with the watching itself — or that nothing is, which
+/// matters just as much: a card that keeps saying "tunnel down" after the
+/// gateway came back is lying, and this is the only thing that clears it.
+///
+/// The counts are kept: what the gateway said does not stop being true
+/// because the connection to it dropped.
+fn mark<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, trouble: Option<Trouble>) {
+    let board = app.state::<Board>();
+    let previous = board.0.lock().ok().and_then(|b| b.get(&p.id).cloned());
     let status = Status {
         profile_id: p.id.clone(),
         name: p.name.clone(),
-        errors: 0,
-        warnings: 0,
-        trouble: Some(trouble.to_string()),
+        errors: previous.as_ref().map_or(0, |s| s.errors),
+        warnings: previous.as_ref().map_or(0, |s| s.warnings),
+        trouble: trouble.map(|t| t.key().to_string()),
     };
-    app.state::<Board>().put(status.clone());
+    if previous.as_ref().and_then(|s| s.trouble.clone()) == status.trouble {
+        return; // nothing changed; the log and the UI do not need to hear it
+    }
+    logx::log(
+        "watch",
+        &format!(
+            "{}: {}",
+            p.id,
+            status.trouble.as_deref().unwrap_or("recovered")
+        ),
+    );
+    board.put(status.clone());
     let _ = app.emit("watch", status);
+}
+
+/// Stop watching this profile, with a reason the card can show. The task
+/// ends here: whatever is wrong needs a person, not another attempt.
+fn give_up<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, trouble: Trouble) {
+    logx::log("watch", &format!("{}: gave up ({})", p.id, trouble.key()));
+    mark(app, p, Some(trouble));
 }
 
 #[cfg(test)]
