@@ -162,6 +162,31 @@ fn token_for(entry: &serde_json::Value, fingerprint: &str) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// Make the token file readable by its owner alone.
+///
+/// `tauri-plugin-store` writes with `fs::write`, which on Linux and macOS
+/// means 0644 under the user's data directory — world-readable on a shared
+/// machine. On Windows the per-user profile's ACL already restricts it, so
+/// there is nothing to tighten there.
+fn own_it_alone(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Where the plugin puts a store file (`BaseDirectory::AppData`).
+fn store_path<R: Runtime>(app: &AppHandle<R>, name: &str) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path().app_data_dir().ok().map(|dir| dir.join(name))
+}
+
 /// Keep a token for a watched profile, with the gateway it belongs to.
 /// Nothing else writes this file.
 pub fn remember_watch_token<R: Runtime>(
@@ -175,7 +200,11 @@ pub fn remember_watch_token<R: Runtime>(
         profile_id,
         serde_json::json!({ "token": token, "fingerprint": fingerprint }),
     );
-    store.save().map_err(|e| e.to_string())
+    store.save().map_err(|e| e.to_string())?;
+    if let Some(path) = store_path(app, WATCH_STORE) {
+        own_it_alone(&path);
+    }
+    Ok(())
 }
 
 /// Forget it — the profile stopped being watched, or stopped existing.

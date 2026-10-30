@@ -123,8 +123,10 @@ pairs the same way.
 
 So: **a session token is stored only for profiles the administrator marks as
 watched**, it is never written into an exported profile document (it is not
-a `Profile` field — a separate store keyed by profile id), and the OS
-keychain is the right home for it the moment this moves past the pilot.
+a `Profile` field — a separate store keyed by profile id), the file is
+0600 in a 0700 directory on Linux and macOS (the store plugin writes 0644;
+on Windows the per-user profile ACL already does this), and the OS keychain
+is the right home for it the moment this moves past the pilot.
 Un-watching a profile deletes its token.
 
 ## The constraint nobody can design around
