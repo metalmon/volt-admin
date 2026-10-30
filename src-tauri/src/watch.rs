@@ -9,14 +9,18 @@
 //! NOTHING HERE LOGS AN EVENT'S TEXT or the token that fetched it. The log
 //! carries counts and outcomes (`docs/specs/diagnostics.md`).
 
-// Nothing calls these yet: the loop that does lives in this same file and
-// lands with the watcher (`docs/superpowers/plans/2026-10-30-gateway-watch.md`,
-// Task 3). Until then the pure half is reachable only from its tests.
-#![allow(dead_code)]
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::time::Duration;
 
-use std::collections::HashSet;
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri_plugin_notification::NotificationExt;
 
-use serde::Deserialize;
+use crate::tunnel::Lang;
+
+use serde::{Deserialize, Serialize};
+
+use crate::logx;
 
 /// Lowest severity worth waking anyone for: OpenTelemetry's Warn.
 pub const SEVERITY_MIN: u8 = 13;
@@ -24,6 +28,11 @@ pub const SEVERITY_MIN: u8 = 13;
 pub const SEVERITY_ERROR: u8 = 17;
 /// How many events one poll may bring back.
 const LIMIT: u16 = 200;
+/// How long between polls. Slow on purpose: this is "tell me within a
+/// minute", not a dashboard.
+const EVERY: Duration = Duration::from_secs(60);
+/// How long one poll may take before it is a failure.
+const TIMEOUT: Duration = Duration::from_secs(15);
 /// How many ids are remembered for deduplication. A gateway logs forever;
 /// this process must not grow with it.
 const SEEN_MAX: usize = 1000;
@@ -32,8 +41,6 @@ const SEEN_MAX: usize = 1000;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Event {
     pub id: String,
-    #[serde(rename = "@timestamp", default)]
-    pub at: String,
     #[serde(rename = "severity_number", default)]
     pub severity: u8,
     #[serde(default)]
@@ -169,6 +176,283 @@ pub fn remember_seen(seen: &mut HashSet<String>, events: &[Event]) {
     }
 }
 
+/// What the UI shows for one watched profile.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub profile_id: String,
+    pub name: String,
+    pub errors: usize,
+    pub warnings: usize,
+    /// Why this profile is not being watched after all — a gateway that
+    /// keeps no log, a token nothing would renew. `None` = watching.
+    pub trouble: Option<String>,
+}
+
+/// Every watched profile's last known state, for a window that opens later
+/// and missed the events.
+#[derive(Default)]
+pub struct Board(pub Mutex<HashMap<String, Status>>);
+
+impl Board {
+    fn put(&self, status: Status) {
+        if let Ok(mut board) = self.0.lock() {
+            board.insert(status.profile_id.clone(), status);
+        }
+    }
+
+    fn drop_profile(&self, profile_id: &str) {
+        if let Ok(mut board) = self.0.lock() {
+            board.remove(profile_id);
+        }
+    }
+
+    pub fn all(&self) -> Vec<Status> {
+        self.0
+            .lock()
+            .map(|b| b.values().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// The running watchers, one task per profile.
+#[derive(Default)]
+pub struct Watchers(pub Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>);
+
+/// Which watchers to start and which to stop. Pure, so the rule is tested
+/// without starting anything.
+pub fn to_start_and_stop(watched: &[String], running: &[String]) -> (Vec<String>, Vec<String>) {
+    let start = watched
+        .iter()
+        .filter(|id| !running.contains(id))
+        .cloned()
+        .collect();
+    let stop = running
+        .iter()
+        .filter(|id| !watched.contains(id))
+        .cloned()
+        .collect();
+    (start, stop)
+}
+
+/// Bring the running watchers in line with the saved profiles. Called at
+/// startup and after every change to a profile — idempotent, so calling it
+/// twice starts nothing twice.
+pub fn sync<R: Runtime>(app: &AppHandle<R>) {
+    let profiles = crate::commands::load_profiles(app).unwrap_or_default();
+    let watched: Vec<String> = profiles
+        .iter()
+        .filter(|p| p.watch && crate::connection::watchable(p).is_ok())
+        .map(|p| p.id.clone())
+        .collect();
+    let watchers = app.state::<Watchers>();
+    let running: Vec<String> = match watchers.0.lock() {
+        Ok(map) => map.keys().cloned().collect(),
+        Err(_) => return,
+    };
+    let (start, stop) = to_start_and_stop(&watched, &running);
+    for id in stop {
+        if let Ok(mut map) = watchers.0.lock() {
+            if let Some(task) = map.remove(&id) {
+                task.abort();
+            }
+        }
+        app.state::<Board>().drop_profile(&id);
+        logx::log("watch", &format!("stopped watching {id}"));
+    }
+    for id in start {
+        let Some(profile) = profiles.iter().find(|p| p.id == id).cloned() else {
+            continue;
+        };
+        let handle = app.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            run_one(handle, profile).await;
+        });
+        if let Ok(mut map) = watchers.0.lock() {
+            map.insert(id.clone(), task);
+        }
+        logx::log("watch", &format!("watching {id}"));
+    }
+}
+
+/// Where this profile's gateway answers. `Local` only in this slice — a
+/// remote one needs a tunnel with no window open (see `watchable`).
+fn base_url(p: &crate::connection::Profile) -> String {
+    format!("http://127.0.0.1:{}", p.panel_port)
+}
+
+/// The token to poll with: the one that was kept, or a fresh pairing.
+async fn obtain_token<R: Runtime>(
+    app: &AppHandle<R>,
+    p: &crate::connection::Profile,
+) -> Result<String, String> {
+    if let Some(token) = crate::settings::watch_token(app, &p.id) {
+        return Ok(token);
+    }
+    let lang = crate::settings::language(app);
+    let code = crate::pair::mint_code(p, None, false, lang).await?;
+    let origin = crate::pair::origin_of(&base_url(p)).ok_or("bad base url")?;
+    let token = crate::pair::redeem_code(&origin, &code).await?;
+    crate::settings::remember_watch_token(app, &p.id, &token)?;
+    Ok(token)
+}
+
+/// One watched gateway, until the watcher is stopped or gives up.
+async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
+    let base = base_url(&p);
+    let client = match reqwest::Client::builder().no_proxy().build() {
+        Ok(c) => c,
+        Err(e) => return give_up(&app, &p, &format!("http client: {e}")),
+    };
+    let mut token = match obtain_token(&app, &p).await {
+        Ok(t) => t,
+        Err(e) => return give_up(&app, &p, &e),
+    };
+    let mut cursor: Option<Cursor> = None;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut started_at: Option<String> = None;
+    // A revoked token is re-paired ONCE. Twice would be a watcher minting a
+    // pairing code every minute against a gateway that keeps refusing it.
+    let mut repaired = false;
+    loop {
+        let answer = client
+            .get(logs_url(&base, cursor.as_ref()))
+            .bearer_auth(&token)
+            .timeout(TIMEOUT)
+            .send()
+            .await;
+        match answer {
+            Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                if repaired {
+                    return give_up(&app, &p, "token-refused");
+                }
+                repaired = true;
+                crate::settings::forget_watch_token(&app, &p.id);
+                match obtain_token(&app, &p).await {
+                    Ok(t) => token = t,
+                    Err(e) => return give_up(&app, &p, &e),
+                }
+                continue;
+            }
+            Ok(r) => {
+                match r
+                    .text()
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|body| parse_poll(&body))
+                {
+                    Ok(poll) => {
+                        if !poll.persistence_enabled {
+                            // Nothing to watch here, and silence must never
+                            // be shown as health.
+                            return give_up(&app, &p, "no-log");
+                        }
+                        if fresh_start(started_at.as_deref(), poll.daemon_started_at.as_deref()) {
+                            // The gateway restarted: the cursor points into
+                            // a store that no longer exists.
+                            cursor = None;
+                            seen.clear();
+                        }
+                        if poll.incomplete {
+                            // The gateway dropped part of its own window
+                            // (retention): some events never reach anyone,
+                            // and that is worth knowing when reading the log.
+                            logx::log("watch", &format!("{}: window incomplete", p.id));
+                        }
+                        started_at = poll.daemon_started_at.clone();
+                        cursor = poll.cursor.clone().or(cursor);
+                        let fresh = unseen(&poll.events, &seen);
+                        remember_seen(&mut seen, &poll.events);
+                        report(&app, &p, &fresh);
+                    }
+                    // A gateway that is down, or answering something else:
+                    // keep the cursor and try again next minute. Not a
+                    // reason to stop watching.
+                    Err(e) => logx::log("watch", &format!("{}: poll unreadable ({e})", p.id)),
+                }
+            }
+            Err(e) => logx::log("watch", &format!("{}: poll failed ({e})", p.id)),
+        }
+        tokio::time::sleep(EVERY).await;
+    }
+}
+
+/// Put what this poll found on the board and tell any open window.
+///
+/// COUNTS ONLY in the log: an event's text is the gateway's business
+/// (`docs/specs/diagnostics.md`).
+fn report<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, fresh: &[Event]) {
+    let errors = fresh.iter().filter(|e| e.is_error()).count();
+    let warnings = fresh.len() - errors;
+    let board = app.state::<Board>();
+    let previous = board.0.lock().ok().and_then(|b| b.get(&p.id).cloned());
+    let status = Status {
+        profile_id: p.id.clone(),
+        name: p.name.clone(),
+        errors: previous.as_ref().map_or(0, |s| s.errors) + errors,
+        warnings: previous.as_ref().map_or(0, |s| s.warnings) + warnings,
+        trouble: None,
+    };
+    if errors + warnings > 0 {
+        logx::log(
+            "watch",
+            &format!("{}: {errors} error(s), {warnings} warning(s)", p.id),
+        );
+    }
+    board.put(status.clone());
+    let _ = app.emit("watch", status.clone());
+    let lang = crate::settings::language(app);
+    crate::tray::set_watch_tooltip(app, lang, status.errors, status.warnings);
+    announce(app, lang, &p.name, fresh);
+}
+
+/// ONE notification per poll, however much the poll brought back.
+///
+/// That is the whole point of the cursor: a laptop that slept for six hours
+/// wakes to a backlog, and six hours of errors must arrive as "17 errors on
+/// VoltLocal", not as seventeen notifications.
+fn announce<R: Runtime>(app: &AppHandle<R>, lang: Lang, profile_name: &str, fresh: &[Event]) {
+    let errors: Vec<&Event> = fresh.iter().filter(|e| e.is_error()).collect();
+    let Some(newest) = errors.first() else {
+        return; // warnings go to the tray; only errors interrupt
+    };
+    let title = match lang {
+        Lang::Ru => format!(
+            "{profile_name}: {}",
+            crate::tray::errors_phrase(lang, errors.len())
+        ),
+        Lang::En => format!(
+            "{profile_name}: {}",
+            crate::tray::errors_phrase(lang, errors.len())
+        ),
+    };
+    // The BODY is the gateway's own message — the thing the administrator
+    // needs — and it still never reaches our log (see `report`).
+    let body = if newest.service.is_empty() {
+        newest.message.clone()
+    } else {
+        format!("{}: {}", newest.service, newest.message)
+    };
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        logx::log("watch", &format!("notification refused ({e})"));
+    }
+}
+
+/// Stop watching this profile, with a reason the card can show. The task
+/// ends here: whatever is wrong needs a person, not another poll.
+fn give_up<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, trouble: &str) {
+    logx::log("watch", &format!("{}: gave up ({trouble})", p.id));
+    let status = Status {
+        profile_id: p.id.clone(),
+        name: p.name.clone(),
+        errors: 0,
+        warnings: 0,
+        trouble: Some(trouble.to_string()),
+    };
+    app.state::<Board>().put(status.clone());
+    let _ = app.emit("watch", status);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +546,6 @@ mod tests {
         for n in 0..1500 {
             let e = Event {
                 id: format!("id-{n}"),
-                at: String::new(),
                 severity: 13,
                 message: String::new(),
                 service: String::new(),
@@ -270,6 +553,18 @@ mod tests {
             remember_seen(&mut seen, std::slice::from_ref(&e));
         }
         assert!(seen.len() <= SEEN_MAX, "{} ids kept", seen.len());
+    }
+
+    #[test]
+    fn syncing_starts_what_is_watched_and_stops_what_is_not() {
+        let watched = ["a".to_string(), "b".to_string()];
+        let running = ["b".to_string(), "c".to_string()];
+        let (start, stop) = to_start_and_stop(&watched, &running);
+        assert_eq!(start, vec!["a".to_string()]);
+        assert_eq!(stop, vec!["c".to_string()], "c is no longer watched");
+        // Idempotent: syncing twice starts nothing twice.
+        let (start, stop) = to_start_and_stop(&watched, &watched);
+        assert!(start.is_empty() && stop.is_empty());
     }
 
     #[test]

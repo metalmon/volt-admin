@@ -135,10 +135,6 @@ pub fn set_language<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Result<(), St
 
 /// The session token the watcher polls this profile's gateway with, if one
 /// was kept.
-///
-/// Unused until the watcher itself lands (Task 3 of
-/// `docs/superpowers/plans/2026-10-30-gateway-watch.md`).
-#[allow(dead_code)]
 pub fn watch_token<R: Runtime>(app: &AppHandle<R>, profile_id: &str) -> Option<String> {
     let store = app.store(WATCH_STORE).ok()?;
     let token = store.get(profile_id)?;
@@ -146,7 +142,6 @@ pub fn watch_token<R: Runtime>(app: &AppHandle<R>, profile_id: &str) -> Option<S
 }
 
 /// Keep a token for a watched profile. Nothing else writes this file.
-#[allow(dead_code)]
 pub fn remember_watch_token<R: Runtime>(
     app: &AppHandle<R>,
     profile_id: &str,

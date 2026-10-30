@@ -52,7 +52,7 @@ fn navigate<R: Runtime>(window: &tauri::WebviewWindow<R>, url: tauri::Url) -> Re
     window.navigate(url).map_err(|e| e.to_string())
 }
 
-fn load_profiles<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<Profile>, String> {
+pub(crate) fn load_profiles<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<Profile>, String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     let profiles = match store.get(PROFILES_KEY) {
         Some(value) => serde_json::from_value(value).map_err(|e| e.to_string())?,
@@ -194,6 +194,13 @@ pub async fn gateway_flags<R: Runtime>(
         listing.push('\n');
     }
     Ok(crate::actions::gateway_flags(&listing))
+}
+
+/// What every watched profile has seen so far — for a window that opens
+/// after the watcher has been running (`crate::watch`).
+#[command]
+pub fn watch_board<R: Runtime>(app: AppHandle<R>) -> Vec<crate::watch::Status> {
+    app.state::<crate::watch::Board>().all()
 }
 
 /// Open another window on the Connect screen. The app is one process with
@@ -346,11 +353,20 @@ pub fn save_profile(app: AppHandle, profile: Profile) -> Result<(), String> {
     }
     profile.validate().map_err(as_ui_error)?;
     let mut profiles = load_profiles(&app)?;
+    let id = profile.id.clone();
+    let watch = profile.watch;
     match profiles.iter_mut().find(|p| p.id == profile.id) {
         Some(existing) => *existing = profile,
         None => profiles.push(profile),
     }
-    persist_profiles(&app, &profiles)
+    persist_profiles(&app, &profiles)?;
+    // A profile that stopped being watched leaves no token behind, and the
+    // watchers follow the store either way (`crate::watch`).
+    if !watch {
+        crate::settings::forget_watch_token(&app, &id);
+    }
+    crate::watch::sync(&app);
+    Ok(())
 }
 
 /// Delete a connection profile by `id`.
@@ -364,7 +380,9 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     crate::settings::forget_watch_token(&app, &id);
     let mut profiles = load_profiles(&app)?;
     profiles.retain(|p| p.id != id);
-    persist_profiles(&app, &profiles)
+    persist_profiles(&app, &profiles)?;
+    crate::watch::sync(&app);
+    Ok(())
 }
 
 /// What `connect` hands back to the Connect screen.

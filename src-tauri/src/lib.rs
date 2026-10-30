@@ -43,6 +43,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         // Remember the window's size and position across runs, so a user who
         // resized it keeps that size. `fit_to_screen` below still caps the
         // restored size to the current screen (the saved one may come from a
@@ -165,6 +166,7 @@ pub fn run() {
             commands::set_language,
             commands::run_gateway_action,
             commands::gateway_flags,
+            commands::watch_board,
             commands::delete_profile,
             commands::connect,
             commands::disconnect
@@ -185,6 +187,10 @@ pub fn run() {
                 // `disconnect` command can navigate back to the launcher
                 // (captured lazily on the first connect — see commands::StartUrl).
                 app.manage(commands::StartUrl::default());
+                // The watchers and what they found: one task per watched
+                // profile, started below once the store can be read.
+                app.manage(watch::Watchers::default());
+                app.manage(watch::Board::default());
 
                 // Point the logger at the platform's log directory before
                 // anything can log (it resolves nothing on its own — see
@@ -205,6 +211,10 @@ pub fn run() {
                 // language comes from the store, because no window exists
                 // yet to ask (see `crate::settings`).
                 tray::install(app.handle(), settings::language(app.handle()))?;
+
+                // Watching is why the tray exists at all: these outlive
+                // every window (`crate::watch`).
+                watch::sync(app.handle());
             }
             Ok(())
         })
