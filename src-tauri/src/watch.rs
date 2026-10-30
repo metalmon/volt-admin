@@ -42,14 +42,46 @@ const SEEN_MAX: usize = 1000;
 /// No `id`: the gateway gives every occurrence its own, and the same
 /// complaint repeating every 15 seconds arrives with 38 of them. What
 /// identifies a PROBLEM here is the message (see `problem`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct Event {
-    #[serde(rename = "severity_number", default)]
     pub severity: u8,
-    #[serde(default)]
     pub message: String,
-    #[serde(default)]
+    /// `service.name` — on the wire `service` is an OBJECT
+    /// (`{"name": "zeroclaw", "version": "0.8.7"}`). A fixture here once
+    /// assumed a string, and the first live poll answered
+    /// "invalid type: map, expected a string" — for the whole page, not
+    /// for that field. Hence `read_event` below.
     pub service: String,
+}
+
+/// Read one event out of whatever arrived.
+///
+/// BY HAND, field by field, because a `Deserialize` derive fails the whole
+/// page when one field has a type it did not expect — and a watcher that
+/// stops watching because voltd changed a field is worse than one that
+/// reads a little less of it. An unreadable field is empty here; an
+/// unreadable page is silence.
+fn read_event(v: &serde_json::Value) -> Event {
+    let text = |at: &str| {
+        v.pointer(at)
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    Event {
+        severity: v
+            .get("severity_number")
+            .and_then(|s| s.as_u64())
+            .unwrap_or(0)
+            .min(u8::MAX as u64) as u8,
+        message: text("/message"),
+        // Both shapes: the object voltd sends, and a bare string if it
+        // ever sends one.
+        service: match v.get("service") {
+            Some(serde_json::Value::String(name)) => name.clone(),
+            _ => text("/service/name"),
+        },
+    }
 }
 
 impl Event {
@@ -84,8 +116,9 @@ pub struct Poll {
 /// later must not turn a poll into a failure.
 #[derive(Deserialize)]
 struct Answer {
+    /// Raw on purpose — see `read_event`.
     #[serde(default)]
-    events: Vec<Event>,
+    events: Vec<serde_json::Value>,
     #[serde(default)]
     next_segment_cursor: Option<String>,
     #[serde(default)]
@@ -110,7 +143,7 @@ pub fn parse_poll(json: &str) -> Result<Poll, String> {
             line_offset: a.next_cursor_line_offset.unwrap_or(0),
         });
     Ok(Poll {
-        events: a.events,
+        events: a.events.iter().map(read_event).collect(),
         cursor,
         persistence_enabled: a.persistence_enabled,
         incomplete: a.incomplete,
@@ -518,12 +551,16 @@ mod tests {
     /// `docs/specs/gateway-monitoring.md`), trimmed to two events.
     const ANSWER: &str = r#"{
       "events": [
-        {"@timestamp":"2026-10-29T23:37:15Z","attributes":{"agent":"ops"},"event":"tool.call",
-         "id":"e0ef98cd","message":"tool timed out","schema_version":"1",
-         "service":"voltd","severity_number":17,"severity_text":"ERROR","zeroclaw":{}},
-        {"@timestamp":"2026-10-29T23:36:44Z","attributes":{},"event":"gateway.request",
-         "id":"113fadc1","message":"slow response","schema_version":"1",
-         "service":"voltd","severity_number":13,"severity_text":"WARN","zeroclaw":{}}
+        {"@timestamp":"2026-10-29T23:37:15Z","attributes":{"_line":645,"claimants":[]},
+         "event":{"action":"fail","category":"cron","outcome":"failure"},
+         "id":"3910219f-e87c-4c74-833d-fadd5a3ed743","message":"tool timed out",
+         "schema_version":2,"service":{"name":"zeroclaw","version":"0.8.7"},
+         "severity_number":17,"severity_text":"ERROR","zeroclaw":{}},
+        {"@timestamp":"2026-10-29T23:36:44Z","attributes":{},
+         "event":{"action":"note","category":"internal"},
+         "id":"113fadc1-0000-0000-0000-000000000000","message":"slow response",
+         "schema_version":2,"service":{"name":"zeroclaw","version":"0.8.7"},
+         "severity_number":13,"severity_text":"WARN","zeroclaw":{}}
       ],
       "next_cursor":"seg-7","next_cursor_line_offset":42,"next_segment_cursor":"seg-7",
       "at_end":false,"incomplete":false,"persistence_enabled":true,
@@ -535,7 +572,10 @@ mod tests {
         let poll = parse_poll(ANSWER).expect("parses");
         assert_eq!(poll.events.len(), 2);
         assert_eq!(poll.events[0].message, "tool timed out");
-        assert_eq!(poll.events[0].service, "voltd");
+        // The shape is the LIVE one, copied off a running gateway: `event`
+        // and `service` are objects, `schema_version` a number. A fixture
+        // invented from a field list parsed here and failed there.
+        assert_eq!(poll.events[0].service, "zeroclaw");
         assert!(poll.events[0].is_error(), "severity 17 is an error");
         assert!(!poll.events[1].is_error(), "severity 13 is a warning");
         assert_eq!(
@@ -550,6 +590,30 @@ mod tests {
         assert_eq!(
             poll.daemon_started_at.as_deref(),
             Some("2026-10-29T21:03:32Z")
+        );
+    }
+
+    #[test]
+    fn one_surprising_field_does_not_cost_the_whole_page() {
+        // What actually happened: `service` is an object, the derive
+        // expected a string, and EVERY poll failed with "invalid type: map,
+        // expected a string" — the watcher saw nothing at all for as long
+        // as that was true. A field it cannot read is empty; the page still
+        // arrives.
+        let odd = r#"{"events":[
+            {"message":"real trouble","severity_number":17,"service":{"name":"zeroclaw"}},
+            {"message":{"not":"a string"},"severity_number":17,"service":"plain"},
+            {"severity_number":"thirteen"}
+        ],"persistence_enabled":true}"#;
+        let poll = parse_poll(odd).expect("the page parses");
+        assert_eq!(poll.events.len(), 3);
+        assert_eq!(poll.events[0].message, "real trouble");
+        assert_eq!(poll.events[0].service, "zeroclaw");
+        assert!(poll.events[1].message.is_empty(), "unreadable, not fatal");
+        assert_eq!(poll.events[1].service, "plain", "a string shape works too");
+        assert_eq!(
+            poll.events[2].severity, 0,
+            "unreadable severity is not an error"
         );
     }
 
@@ -603,7 +667,7 @@ mod tests {
         let same = || Event {
             severity: 13,
             message: "Cron job has no single owning agent".into(),
-            service: "voltd".into(),
+            service: String::new(),
         };
         let events = vec![same(), same(), same()];
         let mut seen = std::collections::HashSet::new();

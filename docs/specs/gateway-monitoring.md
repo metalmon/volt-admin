@@ -72,6 +72,12 @@ event carrying `id`, `@timestamp`, `severity_number`, `severity_text`,
   Warn of category `internal`, which the flag drops. A watcher that hides
   the daemon's own problems watches nothing; the noise the flag existed for
   is handled by the message rule above.
+- **Events are read field by field, not by a derive.** `service` is an
+  object (`{"name": "zeroclaw", "version": "0.8.7"}`); a fixture here
+  assumed a string and every live poll answered "invalid type: map,
+  expected a string" — for the whole page. A watcher that goes silent
+  because voltd changed a field is worse than one that reads a little less
+  of it, so an unreadable field is empty and the page still arrives.
 - **Warnings are worth saying, once.** That failure is a Warn, not an
   Error — so notifying only on Error would have said nothing at all.
 - The store is bounded by the daemon's own config
