@@ -56,7 +56,16 @@ jobs:
             target: linux
           # One universal .dmg covers both Apple Silicon (arm64) and Intel
           # (x86_64) Macs, so a single runner ships every Mac.
-          - platform: macos-14
+          #
+          # `macos-latest`, NOT a pinned version. This was `macos-14` until
+          # GitHub began its brownouts ahead of retiring that image on
+          # 2026-11-02: the job was cancelled a second after it started,
+          # with no runner and no steps, for four builds running — and the
+          # only place that said why was the check-run annotation. The dmg
+          # is a universal build and does not care which macOS builds it,
+          # so following the supported image is better than pinning to one
+          # that will be withdrawn again.
+          - platform: macos-latest
             target: macos
             rust_targets: aarch64-apple-darwin x86_64-apple-darwin
             build_args: --target universal-apple-darwin

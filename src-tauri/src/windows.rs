@@ -84,12 +84,21 @@ pub fn open_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindo
         // layer. This sets both, at creation, which is the only time the
         // webview takes it for the gap between documents.
         .background_color(BACKGROUND_DARK)
+        // INVISIBLE until it is the right size in the right place. Built
+        // visible, the window appeared at whatever the config and the
+        // saved state said and then jumped — the sizing below runs after
+        // creation, because it needs the real decorations and the monitor
+        // it actually landed on, neither of which exist before.
+        .visible(false)
         .build()?;
     // Created dark because the app and the panel are dark by default; a
     // light system is corrected straight away, while the window is still
     // empty.
     paint_for_theme(&window);
     fit_to_screen(&window);
+    // Now it can be looked at. Unconditionally — a window that failed to
+    // measure itself must still be shown, or the app has no window at all.
+    let _ = window.show();
     Ok(window)
 }
 

@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
@@ -42,6 +43,19 @@ export interface Profile {
   keyPath: string | null
   principal: string | null
   paircodeCommand: string | null
+  /** Poll this gateway's log for problems with no window open — see
+   *  `src-tauri/src/watch.rs`. Local profiles only, never password auth. */
+  watch: boolean
+}
+
+/** What one watched profile has seen, from the Rust side's board. */
+export interface WatchStatus {
+  profileId: string
+  name: string
+  errors: number
+  warnings: number
+  /** Why it is not being watched after all: "no-log", "token-refused", … */
+  trouble: string | null
 }
 
 const DEFAULT_PANEL_PORT = 42617
@@ -61,6 +75,7 @@ const emptyDraft = (): Draft => ({
   keyPath: null,
   principal: null,
   paircodeCommand: null,
+  watch: false,
 })
 
 // i18n keys for the enum display labels. The `AuthMethod` / `ConnMode` values
@@ -108,12 +123,14 @@ type GatewayActionId =
   | (typeof gatewayActions)[number]['action']
   | 'enableObservability'
   | 'enableLogPersistence'
+  | 'enableLogWindow'
 
 type GatewayFlags = {
   estopEnabled: boolean
   canResume: boolean
   logsRecorded: boolean
   logsPersisted: boolean
+  logsWindowOk: boolean
 }
 
 const importButtonClass = cn(
@@ -203,6 +220,15 @@ export default function Connect() {
    *  anything. `undefined` = not asked yet or the ask failed — nothing is
    *  greyed out on a guess. */
   const [security, setSecurity] = useState<Record<string, GatewayFlags>>({})
+  // What the watchers have seen. Filled on mount (a window opened after the
+  // watcher had been running misses its events) and kept up by the `watch`
+  // event the Rust side emits.
+  const [watched, setWatched] = useState<Record<string, WatchStatus>>({})
+  // A profile a clicked notification asked to open. Set from the Rust side
+  // two ways — taken on mount (a click with no window open creates this
+  // window, and nothing was listening yet) and by event (a window that was
+  // already here).
+  const [openRequest, setOpenRequest] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -354,6 +380,7 @@ export default function Connect() {
     const steps: GatewayActionId[] = []
     if (!flags.logsRecorded) steps.push('enableObservability')
     if (!flags.logsPersisted) steps.push('enableLogPersistence')
+    if (!flags.logsWindowOk) steps.push('enableLogWindow')
     if (steps.length === 0) return
     setActionBusy(true)
     const printed: string[] = []
@@ -365,7 +392,7 @@ export default function Connect() {
       }
       setSecurity((m) => ({
         ...m,
-        [profile.id]: { ...flags, logsRecorded: true, logsPersisted: true },
+        [profile.id]: { ...flags, logsRecorded: true, logsPersisted: true, logsWindowOk: true },
       }))
       setActionResult({ label, text: printed.join('\n') })
     } catch (e) {
@@ -410,6 +437,33 @@ export default function Connect() {
     }
   }
 
+  useEffect(() => {
+    void invoke<WatchStatus[]>('watch_board')
+      .then((board) => setWatched(Object.fromEntries(board.map((s) => [s.profileId, s]))))
+      .catch(() => {})
+    const unlisten = listen<WatchStatus>('watch', (e) =>
+      setWatched((m) => ({ ...m, [e.payload.profileId]: e.payload })),
+    )
+    void invoke<string | null>('take_watch_click')
+      .then((id) => id && setOpenRequest(id))
+      .catch(() => {})
+    const unOpen = listen<string>('watch:open', (e) => setOpenRequest(e.payload))
+    return () => {
+      void unlisten.then((off) => off())
+      void unOpen.then((off) => off())
+    }
+  }, [])
+
+  // Act on it once the profiles are in: the click arrives before they load.
+  useEffect(() => {
+    if (!openRequest || loading) return
+    const wanted = profiles.find((p) => p.id === openRequest)
+    setOpenRequest(null)
+    // Straight to the page that shows what the notification was about,
+    // not to the panel's front door.
+    if (wanted) void connect(wanted, 'logs')
+  }, [openRequest, profiles, loading])
+
   const closeForm = () => {
     setFormOpen(false)
     setDraft(emptyDraft())
@@ -434,7 +488,15 @@ export default function Connect() {
       setError(t('err.nameRequired'))
       return
     }
-    const profile: Profile = { id: editingId ?? crypto.randomUUID(), ...draft }
+    const profile: Profile = {
+      id: editingId ?? crypto.randomUUID(),
+      ...draft,
+      // A profile switched to remote or to password auth while the box was
+      // already ticked: the box is disabled, but the draft kept the tick,
+      // and Rust would refuse the save. Dropping it here is the honest
+      // reading — the checkbox they can see is not checked.
+      watch: draft.watch && draft.auth !== 'password',
+    }
     try {
       await invoke('save_profile', { profile })
       closeForm()
@@ -453,7 +515,7 @@ export default function Connect() {
     }
   }
 
-  const doConnect = async (profile: Profile, password?: string) => {
+  const doConnect = async (profile: Profile, password?: string, page?: 'logs') => {
     setConnectingId(profile.id)
     setError(null)
     try {
@@ -470,6 +532,7 @@ export default function Connect() {
           profile,
           password,
           lang,
+          page,
         }),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error(t('err.connectTimeout'))), 90_000),
@@ -484,348 +547,27 @@ export default function Connect() {
     }
   }
 
-  const connect = (profile: Profile) => {
+  const connect = (profile: Profile, page?: 'logs') => {
     if (profile.mode === 'remote' && profile.auth === 'password' && passwordPromptId !== profile.id) {
       setError(null)
       setPasswordPromptId(profile.id)
       setPasswordValue('')
       return
     }
-    void doConnect(profile, passwordPromptId === profile.id ? passwordValue : undefined)
+    void doConnect(profile, passwordPromptId === profile.id ? passwordValue : undefined, page)
   }
 
-  return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-10">
-      <header className="relative text-center">
-        {/* A second window is another connection side by side; the tray
-            offers the same thing when no window is in the way. */}
-        <div className="absolute left-0 top-0">
-          <Button
-            variant="outline"
-            onClick={() => void invoke('new_window').catch((e) => setError(String(e)))}
-            className={importButtonClass}
-          >
-            {t('btn.newWindow')}
-          </Button>
-        </div>
-        <div className="absolute right-0 top-0">
-          <LanguageToggle />
-        </div>
-        <h1 className="font-heading text-2xl text-foreground">{t('app.title')}</h1>
-        <p className="text-sm text-muted-foreground">{t('app.subtitle')}</p>
-      </header>
-
-      {error && (
-        <div className="rounded-[var(--radius)] border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive shadow-xs">
-          {error}
-        </div>
-      )}
-
-      {notice && (
-        <div className="rounded-[var(--radius)] border border-border bg-card px-4 py-3 text-sm break-all text-muted-foreground shadow-xs">
-          {notice}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <Spinner size={18} />
-          <span>{t('list.loading')}</span>
-        </div>
-      ) : (
-        <ul className="flex flex-col gap-3">
-          {profiles.length === 0 && (
-            <li className="rounded-[var(--radius)] border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-              {t('list.empty')}
-            </li>
-          )}
-          {profiles.map((p) => (
-            <li key={p.id}>
-              <Card className="gap-3 py-4">
-                <CardContent className="flex items-center justify-between gap-3 px-5">
-                  <div className="flex min-w-0 flex-col">
-                    <span className="truncate font-medium text-card-foreground">{p.name}</span>
-                    {/* Truncates rather than running on: the action row to
-                        the right is `shrink-0`, so a long host used to slide
-                        underneath the buttons. */}
-                    <span className="truncate text-xs text-muted-foreground">
-                      {summaryOf(p, t)}
-                    </span>
-                  </div>
-                  {/* Fluent: secondary/dismissive action on the left, primary
-                      (positive) action rightmost. */}
-                  {/* Connect is the everyday action and stays a button; the
-                      rest live behind the menu, so the card keeps room for
-                      the profile's own line however long the host is. */}
-                  <div className="flex shrink-0 items-center gap-2">
-                    <DropdownMenu onOpenChange={(open) => open && void readFlags(p)}>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="outline"
-                          aria-label={t('card.menu')}
-                          // No 3px glow here: closing the menu returns focus
-                          // to this trigger, so the ring lit up after every
-                          // mouse click. A border highlight still marks the
-                          // trigger for keyboard users (same cue `Select`
-                          // uses) without the halo.
-                          className="px-2.5 focus-visible:border-border-strong focus-visible:ring-0"
-                        >
-                          <MenuIcon className="size-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          disabled={connectingId !== null}
-                          onSelect={() => startEdit(p)}
-                        >
-                          {t('btn.edit')}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => void exportProfile(p)}>
-                          {copiedId === p.id ? t('export.copied') : t('btn.export')}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => void exportProfileToFile(p)}>
-                          {t('btn.exportFile')}
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        {/* Actions on the GATEWAY this profile reaches,
-                            not on the profile itself. */}
-                        <DropdownMenuLabel>{t('gw.title')}</DropdownMenuLabel>
-                        {/* Monitoring reads `GET /api/logs`, which serves
-                            nothing unless the gateway both records events
-                            and keeps them. */}
-                        <DropdownMenuItem
-                          disabled={
-                            actionBusy ||
-                            (security[p.id] !== undefined &&
-                              security[p.id].logsRecorded &&
-                              security[p.id].logsPersisted)
-                          }
-                          title={
-                            security[p.id]?.logsRecorded && security[p.id]?.logsPersisted
-                              ? t('gw.telemetryOn')
-                              : undefined
-                          }
-                          onSelect={() => void enableTelemetry(p)}
-                        >
-                          {t('gw.telemetry')}
-                        </DropdownMenuItem>
-                        {gatewayActions.map((a) => {
-                          // Greyed only on a KNOWN answer: `undefined` means
-                          // the gateway was not asked, or could not answer.
-                          const off = a.needs === 'on' && security[p.id]?.estopEnabled === false
-                          const already = a.needs === 'off' && security[p.id]?.estopEnabled === true
-                          return (
-                          <DropdownMenuItem
-                            key={a.action}
-                            disabled={actionBusy || off || already}
-                            title={off ? t('gw.estopOff') : already ? t('gw.estopAlready') : undefined}
-                            onSelect={() => {
-                              if (a.confirm) {
-                                // A stop that cannot be released is a
-                                // one-way door: voltd refuses `estop resume`
-                                // while a resume needs an OTP that is off.
-                                const trapped =
-                                  a.action === 'emergencyStop' &&
-                                  security[p.id]?.canResume === false
-                                setPendingAction({
-                                  profile: p,
-                                  action: a.action,
-                                  label: t(a.label),
-                                  confirm: trapped
-                                    ? `${t(a.confirm)}
-
-${t('gw.warn.noResume')}`
-                                    : t(a.confirm),
-                                })
-                                return
-                              }
-                              void runGatewayAction(p, a.action, t(a.label), false)
-                            }}
-                          >
-                            {t(a.label)}
-                          </DropdownMenuItem>
-                          )
-                        })}
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onSelect={() => void deleteProfile(p.id)}
-                        >
-                          {t('btn.delete')}
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <Button variant="default" onClick={() => connect(p)} disabled={connectingId !== null}>
-                      {connectingId === p.id ? <Spinner size={14} /> : null}
-                      {t('btn.connect')}
-                    </Button>
-                  </div>
-                </CardContent>
-
-                {passwordPromptId === p.id && (
-                  <CardFooter className="px-5">
-                    <form
-                      className="flex w-full items-center gap-2"
-                      onSubmit={(e) => {
-                        e.preventDefault()
-                        void doConnect(p, passwordValue)
-                      }}
-                    >
-                      <Input
-                        type="password"
-                        autoFocus
-                        value={passwordValue}
-                        onChange={(e) => {
-                          const v = e.currentTarget.value
-                          setPasswordValue(v)
-                        }}
-                        placeholder={t('pwd.placeholder')}
-                        className="flex-1"
-                      />
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          setPasswordPromptId(null)
-                          setPasswordValue('')
-                        }}
-                      >
-                        {t('btn.cancel')}
-                      </Button>
-                      <Button type="submit" variant="default" disabled={connectingId !== null}>
-                        {t('btn.login')}
-                      </Button>
-                    </form>
-                  </CardFooter>
-                )}
-              </Card>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {pendingAction && (
-        <Card className="gap-3 border-destructive/40 py-5">
-          <CardContent className="flex flex-col gap-3 px-5">
-            <h2 className="font-heading text-lg text-foreground">{pendingAction.label}</h2>
-            <p className="whitespace-pre-line text-sm text-destructive">{pendingAction.confirm}</p>
-            <p className="text-xs text-muted-foreground">{pendingAction.profile.name}</p>
-            <div className="flex justify-end gap-2 pt-1">
-              <Button variant="outline" onClick={() => setPendingAction(null)}>
-                {t('btn.cancel')}
-              </Button>
-              {/* Its own verb, and the destructive colour: this card asks
-                  about revoking or stopping, and it used to confirm with
-                  «Импортировать» — the import preview's button, copied with
-                  the card. */}
-              <Button
-                variant="destructive"
-                disabled={actionBusy}
-                onClick={() =>
-                  void runGatewayAction(
-                    pendingAction.profile,
-                    pendingAction.action,
-                    pendingAction.label,
-                    true,
-                  )
-                }
-              >
-                {actionBusy ? <Spinner size={14} /> : null}
-                {t('gw.run')}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {actionResult && (
-        <Card className="gap-3 py-5">
-          <CardContent className="flex flex-col gap-3 px-5">
-            <h2 className="font-heading text-lg text-foreground">
-              {t('gw.result', { action: actionResult.label })}
-            </h2>
-            {/* Selectable: a rotate prints the code that has to be typed
-                somewhere else. */}
-            <pre className="max-h-64 overflow-auto rounded-[var(--radius)] border border-border bg-card px-3 py-2 text-xs whitespace-pre-wrap select-text text-foreground">
-              {actionResult.text}
-            </pre>
-            <div className="flex justify-end">
-              <Button variant="outline" onClick={() => setActionResult(null)}>
-                {t('btn.close')}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {pending && (
-        <Card className="gap-3 border-primary/40 py-5">
-          <CardContent className="flex flex-col gap-3 px-5">
-            <h2 className="font-heading text-lg text-foreground">{t('import.title')}</h2>
-            <div className="flex flex-col">
-              <span className="truncate font-medium text-card-foreground">{pending.name}</span>
-              <span className="text-xs text-muted-foreground">{summaryOf(pending, t)}</span>
-            </div>
-            {profiles.some((p) => p.id === pending.id) && (
-              <p className="text-xs text-muted-foreground">
-                {t('import.replaces', {
-                  name: profiles.find((p) => p.id === pending.id)?.name ?? pending.id,
-                })}
-              </p>
-            )}
-            {/* Everything an import decides on the user's behalf, named:
-                which key file is read, how it authenticates, whose pairing
-                code is minted, which loopback port is bound. */}
-            <dl className="flex flex-col gap-0.5 text-xs text-muted-foreground">
-              {([
-                ['field.auth', t(authLabelKey[pending.auth])],
-                ['field.keyPath', pending.keyPath],
-                ['field.principal', pending.principal],
-                ['field.localPort', pending.localPort?.toString()],
-              ] as const)
-                .filter(([, value]) => value)
-                .map(([key, value]) => (
-                  <div key={key} className="flex gap-2">
-                    <dt className="shrink-0">{t(key)}:</dt>
-                    <dd className="break-all text-foreground">{value}</dd>
-                  </div>
-                ))}
-            </dl>
-            {/* The pairing-code command is shown verbatim, and `validate`
-                refuses the characters that would let it render as less than
-                it runs (newlines, bidi overrides, zero-width). `pre-wrap`
-                keeps the rest of the whitespace honest. */}
-            {pending.paircodeCommand && (
-              <div className="flex flex-col gap-1 rounded-[var(--radius)] border border-destructive/40 bg-destructive/10 px-3 py-2">
-                <span className="text-xs text-destructive">
-                  {t(
-                    pending.mode === 'local'
-                      ? 'import.paircodeWarning.local'
-                      : 'import.paircodeWarning',
-                  )}
-                </span>
-                <code className="whitespace-pre-wrap break-all text-xs text-foreground">
-                  {pending.paircodeCommand}
-                </code>
-              </div>
-            )}
-            <div className="flex justify-end gap-2 pt-1">
-              <Button variant="outline" onClick={() => setPending(null)}>
-                {t('btn.cancel')}
-              </Button>
-              <Button variant="default" onClick={() => void confirmImport()}>
-                {t('import.confirm')}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {formOpen ? (
-        <Card className="gap-4 py-5">
+  /** The profile form. Rendered under the card being edited, or at the
+   *  bottom when it is a new profile — a form far from its card leaves
+   *  the reader guessing which profile they are changing. */
+  const formBody = (alone: boolean) =>
+    formOpen ? (
           <CardContent className="flex flex-col gap-4 px-5">
-            <h2 className="font-heading text-lg text-foreground">
-              {editingId ? t('form.editTitle') : t('form.newTitle')}
-            </h2>
+            {/* Under a card, the card already says which profile this is;
+                the heading would only repeat it. */}
+            {alone ? (
+              <h2 className="font-heading text-lg text-foreground">{t('form.newTitle')}</h2>
+            ) : null}
             <form
               className="flex flex-col gap-4"
               onSubmit={(e) => {
@@ -1012,6 +754,35 @@ ${t('gw.warn.noResume')}`
                 <p className="text-xs text-muted-foreground">{t('field.paircodeCommand.hint')}</p>
               </div>
 
+              {/* Monitoring is opt-in per profile: nothing is watched
+                  because it exists (`docs/specs/gateway-monitoring.md`). */}
+              <div className="flex flex-col gap-1.5">
+                <label className="flex items-center gap-2 text-sm text-foreground">
+                  <input
+                    type="checkbox"
+                    // `--primary` does not exist here — the brand token is
+                    // `--color-brand` (see src/index.css), which is why two
+                    // attempts at this left a Windows-blue box.
+                    style={{ accentColor: 'var(--color-brand)' }}
+                    className="size-4"
+                    checked={draft.watch}
+                    disabled={draft.auth === 'password'}
+                    onChange={(e) => {
+                      const on = e.currentTarget.checked
+                      setDraft((d) => ({ ...d, watch: on }))
+                    }}
+                  />
+                  {t('field.watch')}
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {draft.auth === 'password'
+                    ? t('watch:password')
+                    : draft.mode === 'remote'
+                      ? t('field.watch.remoteHint')
+                      : t('field.watch.hint')}
+                </p>
+              </div>
+
               {/* Fluent: form action row lives at the bottom-right, primary
                   action ("Save") rightmost, secondary ("Cancel") to its left. */}
               <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
@@ -1028,8 +799,387 @@ ${t('gw.warn.noResume')}`
               </div>
             </form>
           </CardContent>
-        </Card>
+    ) : null
+
+  /** A NEW profile has no card to sit under, so it gets one of its own. */
+  const formCard = formOpen ? <Card className="gap-4 py-5">{formBody(true)}</Card> : null
+
+  return (
+    <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-10">
+      <header className="relative text-center">
+        {/* A second window is another connection side by side; the tray
+            offers the same thing when no window is in the way. */}
+        <div className="absolute left-0 top-0">
+          <Button
+            variant="outline"
+            onClick={() => void invoke('new_window').catch((e) => setError(String(e)))}
+            className={importButtonClass}
+          >
+            {t('btn.newWindow')}
+          </Button>
+        </div>
+        <div className="absolute right-0 top-0">
+          <LanguageToggle />
+        </div>
+        <h1 className="font-heading text-2xl text-foreground">{t('app.title')}</h1>
+        <p className="text-sm text-muted-foreground">{t('app.subtitle')}</p>
+      </header>
+
+      {error && (
+        <div className="rounded-[var(--radius)] border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive shadow-xs">
+          {error}
+        </div>
+      )}
+
+      {notice && (
+        <div className="rounded-[var(--radius)] border border-border bg-card px-4 py-3 text-sm break-all text-muted-foreground shadow-xs">
+          {notice}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <Spinner size={18} />
+          <span>{t('list.loading')}</span>
+        </div>
       ) : (
+        <ul className="flex flex-col gap-3">
+          {profiles.length === 0 && (
+            <li className="rounded-[var(--radius)] border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+              {t('list.empty')}
+            </li>
+          )}
+          {profiles.map((p) => (
+            <li key={p.id}>
+              <Card className="gap-3 py-4">
+                <CardContent className="flex items-center justify-between gap-3 px-5">
+                  <div className="flex min-w-0 flex-col">
+                    <span className="truncate font-medium text-card-foreground">{p.name}</span>
+                    {/* Truncates rather than running on: the action row to
+                        the right is `shrink-0`, so a long host used to slide
+                        underneath the buttons. */}
+                    <span className="truncate text-xs text-muted-foreground">
+                      {summaryOf(p, t)}
+                    </span>
+                    {/* Only for a watched profile, and only when there is
+                        something to say — a quiet gateway says «Ошибок нет»,
+                        never nothing at all, because silence is also what a
+                        broken watcher looks like. */}
+                    {p.watch && (
+                      <button
+                        type="button"
+                        title={
+                          watched[p.id]?.errors || watched[p.id]?.warnings
+                            ? t('watch.clear')
+                            : undefined
+                        }
+                        onClick={() => {
+                          void invoke('watch_seen', { profileId: p.id })
+                          setWatched((m) =>
+                            m[p.id] ? { ...m, [p.id]: { ...m[p.id], errors: 0, warnings: 0 } } : m,
+                          )
+                        }}
+                        className={cn(
+                          'truncate text-start text-xs',
+                          watched[p.id]?.trouble
+                            ? 'text-destructive'
+                            : watched[p.id]?.errors
+                              ? 'text-destructive'
+                              : 'text-muted-foreground',
+                        )}
+                      >
+                        {watched[p.id]?.trouble
+                          ? t(`watch.${watched[p.id].trouble}`)
+                          : watched[p.id] && (watched[p.id].errors || watched[p.id].warnings)
+                            ? t('watch.counts', {
+                                e: watched[p.id].errors,
+                                w: watched[p.id].warnings,
+                              })
+                            : t('watch.quiet')}
+                      </button>
+                    )}
+                  </div>
+                  {/* Fluent: secondary/dismissive action on the left, primary
+                      (positive) action rightmost. */}
+                  {/* Connect is the everyday action and stays a button; the
+                      rest live behind the menu, so the card keeps room for
+                      the profile's own line however long the host is. */}
+                  <div className="flex shrink-0 items-center gap-2">
+                    <DropdownMenu onOpenChange={(open) => open && void readFlags(p)}>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          aria-label={t('card.menu')}
+                          // No 3px glow here: closing the menu returns focus
+                          // to this trigger, so the ring lit up after every
+                          // mouse click. A border highlight still marks the
+                          // trigger for keyboard users (same cue `Select`
+                          // uses) without the halo.
+                          className="px-2.5 focus-visible:border-border-strong focus-visible:ring-0"
+                        >
+                          <MenuIcon className="size-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          disabled={connectingId !== null}
+                          onSelect={() => startEdit(p)}
+                        >
+                          {t('btn.edit')}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void exportProfile(p)}>
+                          {copiedId === p.id ? t('export.copied') : t('btn.export')}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void exportProfileToFile(p)}>
+                          {t('btn.exportFile')}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        {/* Actions on the GATEWAY this profile reaches,
+                            not on the profile itself. */}
+                        <DropdownMenuLabel>{t('gw.title')}</DropdownMenuLabel>
+                        {/* Monitoring reads `GET /api/logs`, which serves
+                            nothing unless the gateway both records events
+                            and keeps them. */}
+                        <DropdownMenuItem
+                          disabled={
+                            actionBusy ||
+                            (security[p.id] !== undefined &&
+                              security[p.id].logsRecorded &&
+                              security[p.id].logsPersisted &&
+                              security[p.id].logsWindowOk)
+                          }
+                          title={
+                            security[p.id]?.logsRecorded &&
+                            security[p.id]?.logsPersisted &&
+                            security[p.id]?.logsWindowOk
+                              ? t('gw.telemetryOn')
+                              : undefined
+                          }
+                          onSelect={() => void enableTelemetry(p)}
+                        >
+                          {t('gw.telemetry')}
+                        </DropdownMenuItem>
+                        {gatewayActions.map((a) => {
+                          // Greyed only on a KNOWN answer: `undefined` means
+                          // the gateway was not asked, or could not answer.
+                          const off = a.needs === 'on' && security[p.id]?.estopEnabled === false
+                          const already = a.needs === 'off' && security[p.id]?.estopEnabled === true
+                          return (
+                          <DropdownMenuItem
+                            key={a.action}
+                            disabled={actionBusy || off || already}
+                            title={off ? t('gw.estopOff') : already ? t('gw.estopAlready') : undefined}
+                            onSelect={() => {
+                              if (a.confirm) {
+                                // A stop that cannot be released is a
+                                // one-way door: voltd refuses `estop resume`
+                                // while a resume needs an OTP that is off.
+                                const trapped =
+                                  a.action === 'emergencyStop' &&
+                                  security[p.id]?.canResume === false
+                                setPendingAction({
+                                  profile: p,
+                                  action: a.action,
+                                  label: t(a.label),
+                                  confirm: trapped
+                                    ? `${t(a.confirm)}
+
+${t('gw.warn.noResume')}`
+                                    : t(a.confirm),
+                                })
+                                return
+                              }
+                              void runGatewayAction(p, a.action, t(a.label), false)
+                            }}
+                          >
+                            {t(a.label)}
+                          </DropdownMenuItem>
+                          )
+                        })}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onSelect={() => void deleteProfile(p.id)}
+                        >
+                          {t('btn.delete')}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <Button variant="default" onClick={() => connect(p)} disabled={connectingId !== null}>
+                      {connectingId === p.id ? <Spinner size={14} /> : null}
+                      {t('btn.connect')}
+                    </Button>
+                  </div>
+                </CardContent>
+
+                {passwordPromptId === p.id && (
+                  <CardFooter className="px-5">
+                    <form
+                      className="flex w-full items-center gap-2"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        void doConnect(p, passwordValue)
+                      }}
+                    >
+                      <Input
+                        type="password"
+                        autoFocus
+                        value={passwordValue}
+                        onChange={(e) => {
+                          const v = e.currentTarget.value
+                          setPasswordValue(v)
+                        }}
+                        placeholder={t('pwd.placeholder')}
+                        className="flex-1"
+                      />
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setPasswordPromptId(null)
+                          setPasswordValue('')
+                        }}
+                      >
+                        {t('btn.cancel')}
+                      </Button>
+                      <Button type="submit" variant="default" disabled={connectingId !== null}>
+                        {t('btn.login')}
+                      </Button>
+                    </form>
+                  </CardFooter>
+                )}
+                {/* One card, two parts: the profile and what is being
+                    changed about it. A second card below made the form look
+                    like it belonged to no profile in particular. */}
+                {editingId === p.id ? (
+                  <div className="mt-1 border-t border-border pt-4">{formBody(false)}</div>
+                ) : null}
+              </Card>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {pendingAction && (
+        <Card className="gap-3 border-destructive/40 py-5">
+          <CardContent className="flex flex-col gap-3 px-5">
+            <h2 className="font-heading text-lg text-foreground">{pendingAction.label}</h2>
+            <p className="whitespace-pre-line text-sm text-destructive">{pendingAction.confirm}</p>
+            <p className="text-xs text-muted-foreground">{pendingAction.profile.name}</p>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" onClick={() => setPendingAction(null)}>
+                {t('btn.cancel')}
+              </Button>
+              {/* Its own verb, and the destructive colour: this card asks
+                  about revoking or stopping, and it used to confirm with
+                  «Импортировать» — the import preview's button, copied with
+                  the card. */}
+              <Button
+                variant="destructive"
+                disabled={actionBusy}
+                onClick={() =>
+                  void runGatewayAction(
+                    pendingAction.profile,
+                    pendingAction.action,
+                    pendingAction.label,
+                    true,
+                  )
+                }
+              >
+                {actionBusy ? <Spinner size={14} /> : null}
+                {t('gw.run')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {actionResult && (
+        <Card className="gap-3 py-5">
+          <CardContent className="flex flex-col gap-3 px-5">
+            <h2 className="font-heading text-lg text-foreground">
+              {t('gw.result', { action: actionResult.label })}
+            </h2>
+            {/* Selectable: a rotate prints the code that has to be typed
+                somewhere else. */}
+            <pre className="max-h-64 overflow-auto rounded-[var(--radius)] border border-border bg-card px-3 py-2 text-xs whitespace-pre-wrap select-text text-foreground">
+              {actionResult.text}
+            </pre>
+            <div className="flex justify-end">
+              <Button variant="outline" onClick={() => setActionResult(null)}>
+                {t('btn.close')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {pending && (
+        <Card className="gap-3 border-primary/40 py-5">
+          <CardContent className="flex flex-col gap-3 px-5">
+            <h2 className="font-heading text-lg text-foreground">{t('import.title')}</h2>
+            <div className="flex flex-col">
+              <span className="truncate font-medium text-card-foreground">{pending.name}</span>
+              <span className="text-xs text-muted-foreground">{summaryOf(pending, t)}</span>
+            </div>
+            {profiles.some((p) => p.id === pending.id) && (
+              <p className="text-xs text-muted-foreground">
+                {t('import.replaces', {
+                  name: profiles.find((p) => p.id === pending.id)?.name ?? pending.id,
+                })}
+              </p>
+            )}
+            {/* Everything an import decides on the user's behalf, named:
+                which key file is read, how it authenticates, whose pairing
+                code is minted, which loopback port is bound. */}
+            <dl className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+              {([
+                ['field.auth', t(authLabelKey[pending.auth])],
+                ['field.keyPath', pending.keyPath],
+                ['field.principal', pending.principal],
+                ['field.localPort', pending.localPort?.toString()],
+              ] as const)
+                .filter(([, value]) => value)
+                .map(([key, value]) => (
+                  <div key={key} className="flex gap-2">
+                    <dt className="shrink-0">{t(key)}:</dt>
+                    <dd className="break-all text-foreground">{value}</dd>
+                  </div>
+                ))}
+            </dl>
+            {/* The pairing-code command is shown verbatim, and `validate`
+                refuses the characters that would let it render as less than
+                it runs (newlines, bidi overrides, zero-width). `pre-wrap`
+                keeps the rest of the whitespace honest. */}
+            {pending.paircodeCommand && (
+              <div className="flex flex-col gap-1 rounded-[var(--radius)] border border-destructive/40 bg-destructive/10 px-3 py-2">
+                <span className="text-xs text-destructive">
+                  {t(
+                    pending.mode === 'local'
+                      ? 'import.paircodeWarning.local'
+                      : 'import.paircodeWarning',
+                  )}
+                </span>
+                <code className="whitespace-pre-wrap break-all text-xs text-foreground">
+                  {pending.paircodeCommand}
+                </code>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" onClick={() => setPending(null)}>
+                {t('btn.cancel')}
+              </Button>
+              <Button variant="default" onClick={() => void confirmImport()}>
+                {t('import.confirm')}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Only when it is a NEW profile: an edit renders under the card
+          it is editing, where the reader can see what is being changed. */}
+      {formOpen && editingId === null ? formCard : null}
+      {formOpen ? null : (
         <div className="flex flex-wrap justify-end gap-2">
           <input
             ref={fileRef}

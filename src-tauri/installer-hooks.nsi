@@ -24,12 +24,21 @@
 
 !include LogicLib.nsh
 
-; VOLT_RENAME_SHORTCUT <dir>: if "<dir>\${PRODUCTNAME}.lnk" exists, recreate it as
-; "<dir>\Вольт Админ.lnk" with the same target and delete the Latin original.
+; VOLT_RENAME_SHORTCUT <dir>: if "<dir>\${PRODUCTNAME}.lnk" exists, RENAME it to
+; "<dir>\Вольт Админ.lnk".
+;
+; Rename, not CreateShortcut+Delete. Tauri stamps the shortcut with the
+; AppUserModelID (`ru.metalmon.volt-admin`), and Windows uses that stamp to
+; decide whether a toast belongs to an installed app: without it every
+; notification is dropped SILENTLY — `show()` still returns success. A
+; recreated shortcut has an empty AUMID, which is exactly what the installed
+; build had (checked: `Вольт Админ.lnk -> AUMID = ''`, while the neighbouring
+; app's shortcut carried `ru.metalmon.volt`). Renaming the file keeps its
+; property store, stamp and all.
 !macro VOLT_RENAME_SHORTCUT DIR
   ${If} ${FileExists} "${DIR}\${PRODUCTNAME}.lnk"
-    CreateShortcut "${DIR}\Вольт Админ.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
-    Delete "${DIR}\${PRODUCTNAME}.lnk"
+    Delete "${DIR}\Вольт Админ.lnk"
+    Rename "${DIR}\${PRODUCTNAME}.lnk" "${DIR}\Вольт Админ.lnk"
   ${EndIf}
 !macroend
 

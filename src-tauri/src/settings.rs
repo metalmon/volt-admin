@@ -12,6 +12,12 @@ use tauri_plugin_store::StoreExt;
 use crate::tunnel::Lang;
 
 const STORE_PATH: &str = "settings.json";
+/// The watcher's session tokens, profile id → token. A FILE OF ITS OWN, not
+/// a key in the settings: it is the only secret this app keeps on disk, and
+/// keeping it apart is what makes "never printed, never exported, deleted
+/// with the profile" something a reader can check rather than trust
+/// (`docs/specs/gateway-monitoring.md`).
+const WATCH_STORE: &str = "watch.json";
 const LANG_KEY: &str = "lang";
 /// Profile id → the `connection_fingerprint` of the gateway this app has
 /// already paired with. NOT a secret: it says that a pairing happened, not
@@ -127,9 +133,118 @@ pub fn set_language<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Result<(), St
     store.save().map_err(|e| e.to_string())
 }
 
+/// The token kept for this profile, but ONLY if it was minted for the
+/// gateway the profile names today.
+///
+/// A profile can be edited while it is watched — a different `panel_port`
+/// is a different gateway on this machine — and a token minted for the old
+/// one must not be sent to the new one. The fingerprint is the same one
+/// `crate::registry` refuses stale connections by.
+pub fn watch_token<R: Runtime>(
+    app: &AppHandle<R>,
+    profile_id: &str,
+    fingerprint: &str,
+) -> Option<String> {
+    let store = app.store(WATCH_STORE).ok()?;
+    token_for(&store.get(profile_id)?, fingerprint)
+}
+
+/// The pure half: a kept entry is `{"token": …, "fingerprint": …}`, and it
+/// answers only for its own gateway.
+fn token_for(entry: &serde_json::Value, fingerprint: &str) -> Option<String> {
+    if entry.get("fingerprint")?.as_str()? != fingerprint {
+        return None;
+    }
+    entry
+        .get("token")?
+        .as_str()
+        .map(str::to_string)
+        .filter(|t| !t.is_empty())
+}
+
+/// Make the token file readable by its owner alone.
+///
+/// `tauri-plugin-store` writes with `fs::write`, which on Linux and macOS
+/// means 0644 under the user's data directory — world-readable on a shared
+/// machine. On Windows the per-user profile's ACL already restricts it, so
+/// there is nothing to tighten there.
+fn own_it_alone(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Where the plugin puts a store file (`BaseDirectory::AppData`).
+fn store_path<R: Runtime>(app: &AppHandle<R>, name: &str) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path().app_data_dir().ok().map(|dir| dir.join(name))
+}
+
+/// Keep a token for a watched profile, with the gateway it belongs to.
+/// Nothing else writes this file.
+pub fn remember_watch_token<R: Runtime>(
+    app: &AppHandle<R>,
+    profile_id: &str,
+    token: &str,
+    fingerprint: &str,
+) -> Result<(), String> {
+    let store = app.store(WATCH_STORE).map_err(|e| e.to_string())?;
+    store.set(
+        profile_id,
+        serde_json::json!({ "token": token, "fingerprint": fingerprint }),
+    );
+    store.save().map_err(|e| e.to_string())?;
+    if let Some(path) = store_path(app, WATCH_STORE) {
+        own_it_alone(&path);
+    }
+    Ok(())
+}
+
+/// Forget it — the profile stopped being watched, or stopped existing.
+pub fn forget_watch_token<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
+    let Ok(store) = app.store(WATCH_STORE) else {
+        return;
+    };
+    if store.delete(profile_id) {
+        let _ = store.save();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kept_token_answers_only_for_its_own_gateway() {
+        // A watched profile can be edited — a different panel port is a
+        // different gateway on this machine — and the token minted for the
+        // old one must not be handed to the new one.
+        let entry = serde_json::json!({"token": "t", "fingerprint": "fp1"});
+        assert_eq!(token_for(&entry, "fp1").as_deref(), Some("t"));
+        assert_eq!(token_for(&entry, "fp2"), None);
+    }
+
+    #[test]
+    fn an_entry_without_a_gateway_is_not_trusted() {
+        // What an older version wrote (a bare string), and anything else
+        // that does not say which gateway it is for: pair again.
+        assert_eq!(token_for(&serde_json::json!("t"), "fp1"), None);
+        assert_eq!(token_for(&serde_json::json!({"token": "t"}), "fp1"), None);
+        assert_eq!(
+            token_for(
+                &serde_json::json!({"token": "", "fingerprint": "fp1"}),
+                "fp1"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn a_rotate_forgets_every_profile_pointing_at_that_gateway() {

@@ -81,6 +81,75 @@ pub fn relabel<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> tauri::Result<()> 
     Ok(())
 }
 
+/// Russian counts in three forms, and a tray that gets it wrong is the
+/// first thing a Russian speaker notices. `forms` is (1, 2, 5).
+fn plural_ru(n: usize, forms: (&'static str, &'static str, &'static str)) -> &'static str {
+    let (ones, tens) = (n % 10, n % 100);
+    if ones == 1 && tens != 11 {
+        forms.0
+    } else if (2..=4).contains(&ones) && !(12..=14).contains(&tens) {
+        forms.1
+    } else {
+        forms.2
+    }
+}
+
+/// "3 ошибки" / "3 errors" — shared with the watcher's notification so the
+/// two never count differently.
+pub fn errors_phrase(lang: Lang, errors: usize) -> String {
+    match lang {
+        Lang::Ru => format!(
+            "{errors} {}",
+            plural_ru(errors, ("ошибка", "ошибки", "ошибок"))
+        ),
+        Lang::En => format!("{errors} error{}", if errors == 1 { "" } else { "s" }),
+    }
+}
+
+/// "3 предупреждения" / "3 warnings" — shared with the notification, like
+/// `errors_phrase`.
+pub fn warnings_phrase(lang: Lang, warnings: usize) -> String {
+    match lang {
+        Lang::Ru => format!(
+            "{warnings} {}",
+            plural_ru(
+                warnings,
+                ("предупреждение", "предупреждения", "предупреждений")
+            )
+        ),
+        Lang::En => format!("{warnings} warning{}", if warnings == 1 { "" } else { "s" }),
+    }
+}
+
+/// What the tray says it has seen. The launcher's own name when there is
+/// nothing to report — quiet is the normal state, and the tray must not
+/// look alarmed in it.
+pub fn watch_tooltip(lang: Lang, errors: usize, warnings: usize) -> String {
+    if errors == 0 && warnings == 0 {
+        return windows::launcher_title(lang).to_string();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if errors > 0 {
+        parts.push(errors_phrase(lang, errors));
+    }
+    if warnings > 0 {
+        parts.push(warnings_phrase(lang, warnings));
+    }
+    format!("{} — {}", windows::launcher_title(lang), parts.join(", "))
+}
+
+/// Put that on the tray icon.
+pub fn set_watch_tooltip<R: Runtime>(
+    app: &AppHandle<R>,
+    lang: Lang,
+    errors: usize,
+    warnings: usize,
+) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(watch_tooltip(lang, errors, warnings)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +158,45 @@ mod tests {
     fn both_languages_have_their_own_labels() {
         assert_eq!(labels(Lang::Ru), ("Открыть", "Новое окно", "Выйти"));
         assert_eq!(labels(Lang::En), ("Open", "New window", "Quit"));
+    }
+
+    #[test]
+    fn the_tooltip_says_nothing_when_there_is_nothing_to_say() {
+        // Quiet is the normal state; the tray must not look alarmed in it.
+        assert_eq!(
+            watch_tooltip(Lang::Ru, 0, 0),
+            windows::launcher_title(Lang::Ru)
+        );
+        assert_eq!(
+            watch_tooltip(Lang::En, 0, 0),
+            windows::launcher_title(Lang::En)
+        );
+    }
+
+    #[test]
+    fn the_tooltip_counts_in_the_language_of_the_app() {
+        let ru = watch_tooltip(Lang::Ru, 2, 5);
+        assert!(ru.contains("2 ошибки"), "{ru}");
+        assert!(ru.contains("5 предупреждений"), "{ru}");
+        // Russian counts in three forms, and getting it wrong is the first
+        // thing a Russian speaker sees.
+        assert!(watch_tooltip(Lang::Ru, 1, 0).contains("1 ошибка"));
+        assert!(watch_tooltip(Lang::Ru, 5, 0).contains("5 ошибок"));
+        assert!(watch_tooltip(Lang::Ru, 21, 0).contains("21 ошибка"));
+        let en = watch_tooltip(Lang::En, 2, 5);
+        assert!(en.contains("2 errors") && en.contains("5 warnings"), "{en}");
+        assert!(
+            watch_tooltip(Lang::En, 1, 1).contains("1 error,"),
+            "singular"
+        );
+    }
+
+    #[test]
+    fn warnings_alone_are_still_worth_saying() {
+        assert!(watch_tooltip(Lang::Ru, 0, 3).contains("3 предупреждения"));
+        assert!(
+            !watch_tooltip(Lang::Ru, 0, 3).contains("ошиб"),
+            "no zero errors"
+        );
     }
 }

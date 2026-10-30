@@ -39,6 +39,10 @@ pub enum GatewayAction {
     EnableObservability,
     /// Keep them, so `/api/logs` can serve a window of them.
     EnableLogPersistence,
+    /// Keep ENOUGH of them. voltd's own default is 200 entries — under an
+    /// hour on a quiet gateway, so a laptop that slept comes back to a
+    /// store that has already turned over.
+    EnableLogWindow,
     /// Turn the emergency stop ON in the gateway's config — it ships
     /// disabled, and the other three answer "Emergency stop is disabled"
     /// until it is.
@@ -60,6 +64,7 @@ impl GatewayAction {
             Self::ObservabilityConfig => "config list --filter observability",
             Self::EnableObservability => "config set observability.backend log",
             Self::EnableLogPersistence => "config set observability.log_persistence rolling",
+            Self::EnableLogWindow => "config set observability.log_persistence_max_entries 50000",
             Self::EmergencyEnable => "config set security.estop.enabled true",
             Self::EmergencyStop => "estop --level kill-all",
             Self::EmergencyStatus => "estop status",
@@ -189,7 +194,14 @@ pub struct GatewayFlags {
     /// `observability.log_persistence` keeps what was recorded. Without it
     /// `GET /api/logs` answers `persistence_enabled: false`.
     pub logs_persisted: bool,
+    /// `observability.log_persistence_max_entries` holds a usable window.
+    /// voltd defaults to 200, which a watcher outlives in minutes.
+    pub logs_window_ok: bool,
 }
+
+/// The window a watched gateway needs, and what the deployments this app
+/// ships with are configured for.
+pub const LOG_WINDOW: u64 = 50_000;
 
 /// Read the three lines that matter out of `config list --filter security`.
 ///
@@ -216,6 +228,11 @@ pub fn gateway_flags(listing: &str) -> GatewayFlags {
         // "records nothing" / "keeps nothing" counts as off.
         logs_recorded: value("observability.backend") != Some("none"),
         logs_persisted: value("observability.log_persistence") != Some("off"),
+        // Unreadable claims nothing, as everywhere here: only a number
+        // that is plainly too small counts as too small.
+        logs_window_ok: value("observability.log_persistence_max_entries")
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_none_or(|n| n >= LOG_WINDOW),
     }
 }
 
@@ -238,6 +255,7 @@ mod tests {
             key_path: None,
             principal: None,
             paircode_command: None,
+            watch: false,
         }
     }
 
@@ -277,6 +295,7 @@ mod tests {
 Observability:
   observability.backend                = log          (ObservabilityBackend)
   observability.log_persistence        = rolling      (LogPersistence)
+  observability.log_persistence_max_entries = 50000   (usize)
 ";
 
     #[test]

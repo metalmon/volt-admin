@@ -65,6 +65,26 @@ pub struct Profile {
     /// CLI default, see `crate::pair::paircode_command`.
     #[serde(default)]
     pub paircode_command: Option<String>,
+    /// Poll this gateway's log for problems even with no window open (see
+    /// `crate::watch`). Off unless the administrator asks for it: nothing
+    /// is monitored because a profile exists.
+    #[serde(default)]
+    pub watch: bool,
+}
+
+/// May this profile be watched at all?
+///
+/// `Err` is `"watch:password"` — the UI turns it into its own sentence,
+/// like every other validation error here.
+pub fn watchable(p: &Profile) -> Result<(), String> {
+    // A password profile would mean keeping the password for as long as the
+    // app runs — which is exactly what this app refuses to do (see the
+    // module docs). A remote profile is otherwise fine: the watcher holds
+    // its own tunnel now (`crate::watch`).
+    if p.auth == AuthMethod::Password {
+        return Err("watch:password".into());
+    }
+    Ok(())
 }
 
 /// Is `word` safe to put in the `user@host` argument of an `ssh` command
@@ -191,6 +211,9 @@ impl Profile {
                 return Err("principal".into());
             }
         }
+        if self.watch {
+            watchable(self)?;
+        }
         if self.mode == ConnMode::Remote {
             if self.host.trim().is_empty() {
                 return Err("host".into());
@@ -224,6 +247,61 @@ impl Profile {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_remote_or_password_profile_is_not_watchable() {
+        // Watching means polling with no window open: a remote gateway
+        // needs a tunnel nobody is holding (the next slice), and a password
+        // profile would mean keeping the password for as long as the app
+        // runs — which this app refuses to do anywhere.
+        let mut p = valid();
+        p.mode = ConnMode::Local;
+        p.auth = AuthMethod::Agent;
+        assert_eq!(watchable(&p), Ok(()));
+        p.auth = AuthMethod::Password;
+        assert_eq!(watchable(&p), Err("watch:password".to_string()));
+    }
+
+    #[test]
+    fn a_remote_profile_with_a_key_is_watchable() {
+        // The watcher holds the tunnel itself now, so a remote gateway is
+        // watchable — as long as nothing has to be remembered to reach it.
+        let mut p = valid();
+        p.mode = ConnMode::Remote;
+        p.auth = AuthMethod::Agent;
+        assert_eq!(watchable(&p), Ok(()));
+        p.auth = AuthMethod::KeyFile;
+        assert_eq!(watchable(&p), Ok(()));
+        p.auth = AuthMethod::Password;
+        assert_eq!(
+            watchable(&p),
+            Err("watch:password".to_string()),
+            "a password would have to be kept for as long as the app runs"
+        );
+    }
+
+    #[test]
+    fn validate_refuses_a_watch_it_cannot_honour() {
+        let mut p = valid();
+        p.watch = true;
+        p.mode = ConnMode::Remote;
+        p.host = "h".into();
+        p.user = "u".into();
+        p.auth = AuthMethod::Password;
+        assert_eq!(p.validate(), Err("watch:password".to_string()));
+        p.auth = AuthMethod::Agent;
+        assert_eq!(p.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_profile_document_without_the_field_is_not_watched() {
+        // Every profile written before this feature existed, and every
+        // document someone exports by hand.
+        let doc = r#"{"id":"a","name":"n","mode":"local","host":"127.0.0.1","user":"",
+            "port":22,"panelPort":42617,"auth":"agent","keyPath":null}"#;
+        let p: Profile = serde_json::from_str(doc).expect("parses");
+        assert!(!p.watch);
+    }
     use super::*;
 
     /// A profile that passes `validate`; each test breaks one thing.
@@ -241,6 +319,7 @@ mod tests {
             key_path: None,
             principal: None,
             paircode_command: None,
+            watch: false,
         }
     }
 
@@ -490,6 +569,7 @@ mod tests {
             key_path: None,
             principal: None,
             paircode_command: None,
+            watch: false,
         };
         let j = serde_json::to_string(&p).unwrap();
         assert!(

@@ -52,7 +52,7 @@ fn navigate<R: Runtime>(window: &tauri::WebviewWindow<R>, url: tauri::Url) -> Re
     window.navigate(url).map_err(|e| e.to_string())
 }
 
-fn load_profiles<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<Profile>, String> {
+pub(crate) fn load_profiles<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<Profile>, String> {
     let store = app.store(STORE_PATH).map_err(|e| e.to_string())?;
     let profiles = match store.get(PROFILES_KEY) {
         Some(value) => serde_json::from_value(value).map_err(|e| e.to_string())?,
@@ -194,6 +194,26 @@ pub async fn gateway_flags<R: Runtime>(
         listing.push('\n');
     }
     Ok(crate::actions::gateway_flags(&listing))
+}
+
+/// What every watched profile has seen so far — for a window that opens
+/// after the watcher has been running (`crate::watch`).
+#[command]
+pub fn watch_board<R: Runtime>(app: AppHandle<R>) -> Vec<crate::watch::Status> {
+    app.state::<crate::watch::Board>().all()
+}
+
+/// Mark this gateway's problems as seen — the card's count goes quiet.
+#[command]
+pub fn watch_seen<R: Runtime>(app: AppHandle<R>, profile_id: String) {
+    crate::watch::seen(&app, &profile_id);
+}
+
+/// The profile a clicked notification asked for, if a click is waiting.
+/// Taken, not read: one click opens one gateway, once.
+#[command]
+pub fn take_watch_click<R: Runtime>(app: AppHandle<R>) -> Option<String> {
+    app.state::<crate::watch::Clicked>().take()
 }
 
 /// Open another window on the Connect screen. The app is one process with
@@ -346,11 +366,23 @@ pub fn save_profile(app: AppHandle, profile: Profile) -> Result<(), String> {
     }
     profile.validate().map_err(as_ui_error)?;
     let mut profiles = load_profiles(&app)?;
+    let id = profile.id.clone();
+    let watch = profile.watch;
     match profiles.iter_mut().find(|p| p.id == profile.id) {
         Some(existing) => *existing = profile,
         None => profiles.push(profile),
     }
-    persist_profiles(&app, &profiles)
+    persist_profiles(&app, &profiles)?;
+    // A profile that stopped being watched leaves no token behind. One
+    // that still is keeps its token only while it still names the same
+    // gateway — `settings::watch_token` checks the fingerprint, so an
+    // edited profile pairs again rather than sending the old gateway's
+    // token to a new one.
+    if !watch {
+        crate::settings::forget_watch_token(&app, &id);
+    }
+    crate::watch::sync(&app);
+    Ok(())
 }
 
 /// Delete a connection profile by `id`.
@@ -359,9 +391,27 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
     // Its pairing marker goes too, or re-creating the profile later would
     // look already paired to a gateway that has forgotten this app.
     crate::settings::forget_paired(&app, &id);
+    // And the watcher's session token: a deleted profile leaves no secret
+    // behind (`docs/specs/gateway-monitoring.md`).
+    crate::settings::forget_watch_token(&app, &id);
     let mut profiles = load_profiles(&app)?;
     profiles.retain(|p| p.id != id);
-    persist_profiles(&app, &profiles)
+    persist_profiles(&app, &profiles)?;
+    crate::watch::sync(&app);
+    Ok(())
+}
+
+/// The path to open inside the panel: its root unless the caller named a
+/// page, and only a page this app knows.
+///
+/// An allow-list, not the string handed in: the value reaches a
+/// `window.navigate` on the panel's own origin, where a crafted path is a
+/// request made as the signed-in administrator.
+pub(crate) fn panel_page(page: Option<&str>) -> &'static str {
+    match page {
+        Some("logs") => "/logs",
+        _ => "/",
+    }
 }
 
 /// What `connect` hands back to the Connect screen.
@@ -382,6 +432,9 @@ pub struct ConnectResult {
 ///   so a failed attempt leaves the working one alone (`crate::registry`).
 ///
 /// `password` is only used for `AuthMethod::Password` profiles and is
+/// `page` names where in the panel to land: `None` is its root, which is
+/// what pressing «Подключить» means, and a notification click asks instead
+/// for the page that shows what it was notifying about.
 /// never persisted — see `crate::tunnel`.
 #[command]
 pub async fn connect<R: Runtime>(
@@ -390,6 +443,7 @@ pub async fn connect<R: Runtime>(
     profile: Profile,
     password: Option<String>,
     lang: Option<String>,
+    page: Option<String>,
     registry: State<'_, Registry>,
 ) -> Result<ConnectResult, String> {
     // UI language for any user-facing tunnel error (RU-first default).
@@ -640,10 +694,18 @@ pub async fn connect<R: Runtime>(
     // index.html there, which itself pulls assets from `/_app/*`. `/_app/`
     // is only the static-asset prefix — requesting it bare returns 400 by
     // design (see the gateway's static_files handler), so navigate to `/`.
-    let panel_url = format!("{}/", base_url.trim_end_matches('/'));
+    let panel_url = format!(
+        "{}{}",
+        base_url.trim_end_matches('/'),
+        panel_page(page.as_deref())
+    );
     logx::log("connect", &format!("navigate to {panel_url}"));
     let url = tauri::Url::parse(&panel_url).map_err(|e| e.to_string())?;
     navigate(&window, url)?;
+
+    // Opening the panel is looking at the gateway: whatever its watcher
+    // had counted up is no longer unseen (`crate::watch`).
+    crate::watch::seen(&app, &profile.id);
 
     // Connection identity in the OS title bar, per window.
     let _ = window.set_title(&format!(
@@ -700,6 +762,22 @@ pub async fn disconnect<R: Runtime>(
         Some(url) => navigate(&window, url),
         // Never connected this session → nothing to navigate back to.
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod panel_page_tests {
+    use super::panel_page;
+
+    #[test]
+    fn only_the_pages_this_app_knows_are_opened() {
+        // The value lands in a `navigate` on the panel's own origin, where
+        // the administrator is signed in: a path from anywhere but this
+        // list is not a page, it is a request made as them.
+        assert_eq!(panel_page(Some("logs")), "/logs");
+        assert_eq!(panel_page(None), "/");
+        assert_eq!(panel_page(Some("..%2Fadmin")), "/");
+        assert_eq!(panel_page(Some("/logs")), "/", "not even a near miss");
     }
 }
 

@@ -61,9 +61,45 @@ event carrying `id`, `@timestamp`, `severity_number`, `severity_text`,
   paginated query over the persisted JSONL event store, with
   `severity_min`, `hide_internal`, `limit` and a cursor
   (`until_segment_cursor` + `until_line_offset`).
-- The events are structured (`zeroclaw_log::LogEvent`): **an `id`**, a
-  `Severity`, an `EventCategory`, an `EventOutcome`. The id is what makes
-  "notify once per problem" exact rather than a hash of a rendered line.
+- **That cursor pages BACKWARDS, and the watcher must not use it.** Checked
+  against a live gateway: the page fetched with the cursor from the previous
+  answer was a minute OLDER, not newer. A watcher following it walks deeper
+  into the past every minute and never sees today — which is what the first
+  build did, silently. Every poll asks for the newest page instead; what is
+  new is decided here, by event id.
+- The events are structured (`zeroclaw_log::LogEvent`): an `id`, a
+  `Severity`, an `EventCategory`, an `EventOutcome`.
+- **The id is per OCCURRENCE, not per problem**, which the first live test
+  settled: one misconfiguration repeating every 15 seconds filled 38 of 40
+  events in a single poll, each with its own id. What a person would call
+  one problem is one MESSAGE, so that is what the watcher deduplicates by.
+- **`hide_internal` must be false.** It was `true` to keep that noise out —
+  until a deliberately failed cron job logged `Scheduler job '' failed` as a
+  Warn of category `internal`, which the flag drops. A watcher that hides
+  the daemon's own problems watches nothing; the noise the flag existed for
+  is handled by the message rule above.
+- **Events are read field by field, not by a derive.** `service` is an
+  object (`{"name": "zeroclaw", "version": "0.8.7"}`); a fixture here
+  assumed a string and every live poll answered "invalid type: map,
+  expected a string" — for the whole page. A watcher that goes silent
+  because voltd changed a field is worse than one that reads a little less
+  of it, so an unreadable field is empty and the page still arrives.
+- **Warnings are worth saying, once — and again if they come back.** That
+  failure is a Warn, not an Error, so notifying only on Error would have
+  said nothing. A message already announced stays quiet for 30 minutes;
+  after that the same failure is news again, because a watcher that
+  mentioned something once in the morning and never again is a watcher that
+  missed it.
+
+### Windows drops a toast with no AppUserModelID
+
+The first watched build raised its notifications into nothing: `show()`
+returned success and no toast appeared. Windows matches a toast to an
+installed app by the `AppUserModelID` stamped on its Start-menu shortcut,
+and our NSIS hook — which renames the shortcut to «Вольт Админ» — was
+recreating it rather than renaming it, so the stamp was lost (checked:
+`Вольт Админ.lnk -> AUMID = ''`, next to a sibling app's
+`ru.metalmon.volt`). It renames the file now, property store and all.
 - The store is bounded by the daemon's own config
   (`[observability] log_persistence_max_entries`), and a daemon with
   persistence off answers `persistence_enabled: false` instead of serving a
@@ -108,10 +144,25 @@ lives in memory for the length of a connection. A watched profile needs a
 session token that survives restarts, and `tauri-plugin-store` writes plain
 JSON next to the profiles.
 
+The token is kept WITH the gateway it was minted for (the profile's
+`connection_fingerprint`), and is used only while the profile still names
+that gateway: a watched profile whose `panel_port` is edited is a different
+gateway on the same machine, and the old token must not be sent to it.
+
+A 401 means the gateway revoked it (any `--rotate` does). The watcher pairs
+again ONCE and then stops with a reason — a watcher that re-pairs on every
+refusal would mint a pairing code every minute at a gateway that keeps
+saying no. Pairing unattended is what ticking "watch" consents to; verifying
+that the loopback port is really voltd (rather than a process that took the
+port first) is an app-wide question this feature does not answer — `connect`
+pairs the same way.
+
 So: **a session token is stored only for profiles the administrator marks as
 watched**, it is never written into an exported profile document (it is not
-a `Profile` field — a separate store keyed by profile id), and the OS
-keychain is the right home for it the moment this moves past the pilot.
+a `Profile` field — a separate store keyed by profile id), the file is
+0600 in a 0700 directory on Linux and macOS (the store plugin writes 0644;
+on Windows the per-user profile ACL already does this), and the OS keychain
+is the right home for it the moment this moves past the pilot.
 Un-watching a profile deletes its token.
 
 ## The constraint nobody can design around
@@ -174,6 +225,76 @@ their time and text, and a "mark as read" that clears the card.
 window, which the current model refuses by design: "Multi-copy model: no
 tray. Closing the window quits this copy" (`lib.rs`). Resolve that first —
 see Decide before building.
+
+## The gateway pushes, too: `GET /api/events`
+
+Found by probing the gateway rather than by reading about it — `/api/events`
+answered 401 where every made-up path answered 404, and with a token it
+answers `content-type: text/event-stream` and starts sending the same
+structured events as `/api/logs`, live.
+
+So the watcher does not poll. It **catches up once and then listens**:
+
+- `GET /api/logs` on every (re)connection — "what is wrong right now",
+  including everything missed while disconnected;
+- `GET /api/events` held open — "what is happening", arriving in seconds
+  rather than within a minute.
+
+What the stream will and will not do, all checked against a live gateway:
+
+- **`severity_min` is ignored** on this endpoint: asked for 17, it sent a
+  13. Filtering is ours.
+- **`hide_internal=true` IS honoured** — and must not be used, for the
+  reason the poll already had: the daemon's own failures are `internal`.
+- **Frames carry only `data:`** — no `id:`, so no `Last-Event-ID` resume.
+  That is why the catch-up fetch exists.
+- **There is no heartbeat.** A gateway with nothing to say and a connection
+  that died look identical from here, so the stream is recycled after five
+  minutes of silence; the catch-up on reconnect makes that free.
+
+## Watching through a tunnel
+
+A `Remote` profile's gateway is reachable only through SSH, and watching it
+means a tunnel with nobody at the keyboard. The registry built in phase 1
+already has the holder for exactly this (`Holder::Monitor`), and the rules
+are:
+
+- **The tunnel stays up** while the profile is watched. Opening one per
+  poll would mean an ssh handshake a minute, a line in the server's auth
+  log each time, and a second of latency before every answer — and with a
+  stream instead of a poll there is nothing to open it for.
+- **It binds the port a window would bind** (`localPort` / the stable
+  per-profile port), so a window opened later JOINS that connection instead
+  of raising a second tunnel. That is what the registry's holders are for.
+- **Agent or key only.** A password profile would mean keeping the password
+  for as long as the app runs, which this app refuses everywhere else.
+- **A tunnel that will not come up degrades and says so**: retry with
+  backoff (5s, 30s, 5min), and after that the card says the tunnel is down
+  rather than showing a quiet gateway. Silence and health look the same
+  from outside, which is the whole reason this feature exists.
+- **Unwatching releases the holder**, and the tunnel goes with it unless a
+  window is still holding it. Stopping is ORDERED — abort the task, wait
+  for it to be gone, then release — because a dying task can still publish
+  a tunnel nobody would ever release, and a release that arrives late can
+  take the hold a restarted watcher just claimed.
+- **Editing a watched profile restarts its watcher.** The task carries the
+  address it was started with; a watcher still tunnelling to the old host
+  after the profile was pointed at a new one is worse than no watcher at
+  all. The `connection_fingerprint` is kept beside the task, and a change
+  to it is a stop followed by a start.
+
+## What the number on the card means
+
+UNSEEN problems, not a running total. It is cleared when someone looks at
+that gateway — a window connecting to it, or a click on the line itself —
+the way an unread count is. A counter that only ever grows says
+"предупреждений: 412" by the second day and has stopped carrying
+information; what the administrator needs to know is whether anything has
+happened that they have not looked at.
+
+The counts live in memory, so a restart clears them too. That is honest:
+after a restart nothing has been missed, because the catch-up fetch
+re-reads the gateway's own window from scratch.
 
 ## Turning the source on
 
