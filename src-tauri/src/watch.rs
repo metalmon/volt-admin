@@ -222,6 +222,23 @@ pub struct Status {
     pub trouble: Option<String>,
 }
 
+/// A profile whose notification was clicked, waiting for a window to ask
+/// for it.
+///
+/// Not an event alone: clicking a toast with no window open creates one,
+/// and the Connect screen is not listening yet when it does. The screen
+/// asks for this on mount, and the event covers a window that was already
+/// there.
+#[derive(Default)]
+pub struct Clicked(pub Mutex<Option<String>>);
+
+impl Clicked {
+    /// Take it — one click opens one gateway, once.
+    pub fn take(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|mut c| c.take())
+    }
+}
+
 /// Every watched profile's last known state, for a window that opens later
 /// and missed the events.
 #[derive(Default)]
@@ -440,7 +457,7 @@ fn report<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, fresh:
     let _ = app.emit("watch", status.clone());
     let lang = crate::settings::language(app);
     crate::tray::set_watch_tooltip(app, lang, status.errors, status.warnings);
-    announce(app, lang, &p.name, fresh);
+    announce(app, lang, &p.name, &p.id, fresh);
 }
 
 /// ONE notification per poll, however much the poll brought back.
@@ -454,7 +471,13 @@ fn report<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, fresh:
 /// errors said nothing at all — which is what the first watched build did.
 /// `due_problems` has already collapsed the repeats, so everything here is
 /// something this watcher has not mentioned lately.
-fn announce<R: Runtime>(app: &AppHandle<R>, lang: Lang, profile_name: &str, fresh: &[Event]) {
+fn announce<R: Runtime>(
+    app: &AppHandle<R>,
+    lang: Lang,
+    profile_name: &str,
+    p_id: &str,
+    fresh: &[Event],
+) {
     let errors = fresh.iter().filter(|e| e.is_error()).count();
     let Some(newest) = fresh
         .iter()
@@ -476,7 +499,7 @@ fn announce<R: Runtime>(app: &AppHandle<R>, lang: Lang, profile_name: &str, fres
     } else {
         format!("{}: {}", newest.service, newest.message)
     };
-    match toast(app, &title, &body) {
+    match toast(app, &title, &body, p_id) {
         // Counts only, never the text — but DO say that it went out. The
         // first build logged nothing on success, so "no notification
         // appeared" had no evidence on either side of the glass.
@@ -496,8 +519,17 @@ fn announce<R: Runtime>(app: &AppHandle<R>, lang: Lang, profile_name: &str, fres
 /// that STAYS. A watcher exists to be seen by someone who stepped away, so
 /// the toast is a reminder: pre-expanded, on screen until dismissed.
 #[cfg(windows)]
-fn toast<R: Runtime>(app: &AppHandle<R>, title: &str, body: &str) -> Result<(), String> {
+fn toast<R: Runtime>(
+    app: &AppHandle<R>,
+    title: &str,
+    body: &str,
+    profile_id: &str,
+) -> Result<(), String> {
     use tauri_winrt_notification::{Duration as ToastDuration, Scenario, Toast};
+    // Clicking it opens that gateway's panel — the next thing the person
+    // reading it wants, and the reason they are reading it at all.
+    let opener = app.clone();
+    let wanted = profile_id.to_string();
     // The AppUserModelID Windows matches against the Start-menu shortcut
     // the installer stamps (see `installer-hooks.nsi`). Missing or wrong,
     // and the toast is dropped in silence.
@@ -506,12 +538,40 @@ fn toast<R: Runtime>(app: &AppHandle<R>, title: &str, body: &str) -> Result<(), 
         .text1(body)
         .scenario(Scenario::Reminder)
         .duration(ToastDuration::Long)
+        .on_activated(move |_action| {
+            open_for(&opener, &wanted);
+            Ok(())
+        })
         .show()
         .map_err(|e| e.to_string())
 }
 
+/// Hand a window this profile and bring it forward.
+///
+/// Windows-only for now, because only the Windows toast carries a click
+/// back to us — the plugin's notifications on the other platforms do not,
+/// and a function nothing calls is a warning the build refuses.
+///
+/// Both halves are needed: the state for a window that does not exist yet
+/// (the Connect screen asks on mount), the event for one that does and is
+/// already past its mount.
+#[cfg(windows)]
+pub fn open_for<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
+    if let Ok(mut clicked) = app.state::<Clicked>().0.lock() {
+        *clicked = Some(profile_id.to_string());
+    }
+    logx::log("watch", &format!("{profile_id}: notification clicked"));
+    crate::windows::show_a_window(app);
+    let _ = app.emit("watch:open", profile_id.to_string());
+}
+
 #[cfg(not(windows))]
-fn toast<R: Runtime>(app: &AppHandle<R>, title: &str, body: &str) -> Result<(), String> {
+fn toast<R: Runtime>(
+    app: &AppHandle<R>,
+    title: &str,
+    body: &str,
+    _profile_id: &str,
+) -> Result<(), String> {
     use tauri_plugin_notification::NotificationExt;
     app.notification()
         .builder()

@@ -222,6 +222,11 @@ export default function Connect() {
   // watcher had been running misses its events) and kept up by the `watch`
   // event the Rust side emits.
   const [watched, setWatched] = useState<Record<string, WatchStatus>>({})
+  // A profile a clicked notification asked to open. Set from the Rust side
+  // two ways — taken on mount (a click with no window open creates this
+  // window, and nothing was listening yet) and by event (a window that was
+  // already here).
+  const [openRequest, setOpenRequest] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -436,10 +441,23 @@ export default function Connect() {
     const unlisten = listen<WatchStatus>('watch', (e) =>
       setWatched((m) => ({ ...m, [e.payload.profileId]: e.payload })),
     )
+    void invoke<string | null>('take_watch_click')
+      .then((id) => id && setOpenRequest(id))
+      .catch(() => {})
+    const unOpen = listen<string>('watch:open', (e) => setOpenRequest(e.payload))
     return () => {
       void unlisten.then((off) => off())
+      void unOpen.then((off) => off())
     }
   }, [])
+
+  // Act on it once the profiles are in: the click arrives before they load.
+  useEffect(() => {
+    if (!openRequest || loading) return
+    const wanted = profiles.find((p) => p.id === openRequest)
+    setOpenRequest(null)
+    if (wanted) void connect(wanted)
+  }, [openRequest, profiles, loading])
 
   const closeForm = () => {
     setFormOpen(false)
@@ -1082,7 +1100,11 @@ ${t('gw.warn.noResume')}`
                 <label className="flex items-center gap-2 text-sm text-foreground">
                   <input
                     type="checkbox"
-                    className="size-4 accent-[var(--primary)]"
+                    // The arbitrary-value class did not compile and the box
+                    // came out Windows blue; `accent-color` is one property,
+                    // so it is set as one.
+                    style={{ accentColor: 'var(--primary)' }}
+                    className="size-4"
                     checked={draft.watch}
                     disabled={draft.mode === 'remote' || draft.auth === 'password'}
                     onChange={(e) => {

@@ -203,6 +203,13 @@ pub fn watch_board<R: Runtime>(app: AppHandle<R>) -> Vec<crate::watch::Status> {
     app.state::<crate::watch::Board>().all()
 }
 
+/// The profile a clicked notification asked for, if a click is waiting.
+/// Taken, not read: one click opens one gateway, once.
+#[command]
+pub fn take_watch_click<R: Runtime>(app: AppHandle<R>) -> Option<String> {
+    app.state::<crate::watch::Clicked>().take()
+}
+
 /// Open another window on the Connect screen. The app is one process with
 /// several windows now (see `crate::windows`), so this is how a second
 /// connection is started without launching the exe again.

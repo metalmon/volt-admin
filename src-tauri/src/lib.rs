@@ -167,6 +167,7 @@ pub fn run() {
             commands::run_gateway_action,
             commands::gateway_flags,
             commands::watch_board,
+            commands::take_watch_click,
             commands::delete_profile,
             commands::connect,
             commands::disconnect
@@ -191,6 +192,7 @@ pub fn run() {
                 // profile, started below once the store can be read.
                 app.manage(watch::Watchers::default());
                 app.manage(watch::Board::default());
+                app.manage(watch::Clicked::default());
 
                 // Point the logger at the platform's log directory before
                 // anything can log (it resolves nothing on its own — see
