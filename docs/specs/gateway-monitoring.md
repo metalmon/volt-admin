@@ -273,7 +273,15 @@ are:
   rather than showing a quiet gateway. Silence and health look the same
   from outside, which is the whole reason this feature exists.
 - **Unwatching releases the holder**, and the tunnel goes with it unless a
-  window is still holding it.
+  window is still holding it. Stopping is ORDERED — abort the task, wait
+  for it to be gone, then release — because a dying task can still publish
+  a tunnel nobody would ever release, and a release that arrives late can
+  take the hold a restarted watcher just claimed.
+- **Editing a watched profile restarts its watcher.** The task carries the
+  address it was started with; a watcher still tunnelling to the old host
+  after the profile was pointed at a new one is worse than no watcher at
+  all. The `connection_fingerprint` is kept beside the task, and a change
+  to it is a stop followed by a start.
 
 ## Turning the source on
 

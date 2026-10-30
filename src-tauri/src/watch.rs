@@ -347,22 +347,46 @@ impl Board {
     }
 }
 
+/// One running watcher, and the gateway it was started for.
+pub struct Watcher {
+    /// The profile's `connection_fingerprint` when this task began. A
+    /// profile can be edited while it is watched, and a watcher still
+    /// tunnelling to the host it was started with is worse than none.
+    fingerprint: String,
+    task: tauri::async_runtime::JoinHandle<()>,
+}
+
 /// The running watchers, one task per profile.
 #[derive(Default)]
-pub struct Watchers(pub Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>);
+pub struct Watchers {
+    tasks: Mutex<HashMap<String, Watcher>>,
+    /// One `sync` at a time. Stopping is abort-then-await-then-release, and
+    /// two syncs interleaving there could release a hold the other had just
+    /// taken.
+    gate: tokio::sync::Mutex<()>,
+}
 
-/// Which watchers to start and which to stop. Pure, so the rule is tested
-/// without starting anything.
-pub fn to_start_and_stop(watched: &[String], running: &[String]) -> (Vec<String>, Vec<String>) {
+/// Which watchers to start and which to stop, by id and the gateway each
+/// one is for. Pure, so the rule is tested without starting anything.
+///
+/// An id in BOTH lists with a different fingerprint is a profile that was
+/// edited: it appears in `stop` and in `start`, and the caller does them in
+/// that order.
+pub fn to_start_and_stop(
+    watched: &[(String, String)],
+    running: &[(String, String)],
+) -> (Vec<String>, Vec<String>) {
+    let same =
+        |a: &[(String, String)], id: &str, fp: &str| a.iter().any(|(i, f)| i == id && f == fp);
     let start = watched
         .iter()
-        .filter(|id| !running.contains(id))
-        .cloned()
+        .filter(|(id, fp)| !same(running, id, fp))
+        .map(|(id, _)| id.clone())
         .collect();
     let stop = running
         .iter()
-        .filter(|id| !watched.contains(id))
-        .cloned()
+        .filter(|(id, fp)| !same(watched, id, fp))
+        .map(|(id, _)| id.clone())
         .collect();
     (start, stop)
 }
@@ -371,48 +395,60 @@ pub fn to_start_and_stop(watched: &[String], running: &[String]) -> (Vec<String>
 /// startup and after every change to a profile — idempotent, so calling it
 /// twice starts nothing twice.
 pub fn sync<R: Runtime>(app: &AppHandle<R>) {
-    let profiles = crate::commands::load_profiles(app).unwrap_or_default();
-    let watched: Vec<String> = profiles
-        .iter()
-        .filter(|p| p.watch && crate::connection::watchable(p).is_ok())
-        .map(|p| p.id.clone())
-        .collect();
-    let watchers = app.state::<Watchers>();
-    let running: Vec<String> = match watchers.0.lock() {
-        Ok(map) => map.keys().cloned().collect(),
-        Err(_) => return,
-    };
-    let (start, stop) = to_start_and_stop(&watched, &running);
-    for id in stop {
-        if let Ok(mut map) = watchers.0.lock() {
-            if let Some(task) = map.remove(&id) {
-                task.abort();
-            }
-        }
-        app.state::<Board>().drop_profile(&id);
-        // The aborted task cannot do this itself — abort runs no async
-        // cleanup — so the holder is dropped here, which is also what
-        // takes the tunnel down when nothing else wants it.
-        let handle = app.clone();
-        let gone = id.clone();
-        tauri::async_runtime::spawn(async move {
-            release_connection(&handle, &gone).await;
-        });
-        logx::log("watch", &format!("stopped watching {id}"));
-    }
-    for id in start {
-        let Some(profile) = profiles.iter().find(|p| p.id == id).cloned() else {
-            continue;
+    // ALL of it in one task, because stopping a watcher has to be ordered:
+    // abort it, wait for it to actually be gone, and only then let go of
+    // the connection it was holding. Doing the release beside the abort
+    // leaves a window where the dying task publishes a tunnel nobody will
+    // ever release — or where the release takes the hold a restarted
+    // watcher has just claimed.
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let watchers = app.state::<Watchers>();
+        let _one_at_a_time = watchers.gate.lock().await;
+
+        let profiles = crate::commands::load_profiles(&app).unwrap_or_default();
+        let watched: Vec<(String, String)> = profiles
+            .iter()
+            .filter(|p| p.watch && crate::connection::watchable(p).is_ok())
+            .map(|p| (p.id.clone(), p.connection_fingerprint()))
+            .collect();
+        let running: Vec<(String, String)> = match watchers.tasks.lock() {
+            Ok(map) => map
+                .iter()
+                .map(|(id, w)| (id.clone(), w.fingerprint.clone()))
+                .collect(),
+            Err(_) => return,
         };
-        let handle = app.clone();
-        let task = tauri::async_runtime::spawn(async move {
-            run_one(handle, profile).await;
-        });
-        if let Ok(mut map) = watchers.0.lock() {
-            map.insert(id.clone(), task);
+        let (start, stop) = to_start_and_stop(&watched, &running);
+
+        for id in stop {
+            let watcher = watchers.tasks.lock().ok().and_then(|mut m| m.remove(&id));
+            if let Some(w) = watcher {
+                w.task.abort();
+                // Gone for certain before anything else touches its
+                // connection. (`abort` only asks.)
+                let _ = w.task.await;
+            }
+            app.state::<Board>().drop_profile(&id);
+            release_connection(&app, &id).await;
+            logx::log("watch", &format!("stopped watching {id}"));
         }
-        logx::log("watch", &format!("watching {id}"));
-    }
+
+        for id in start {
+            let Some(profile) = profiles.iter().find(|p| p.id == id).cloned() else {
+                continue;
+            };
+            let fingerprint = profile.connection_fingerprint();
+            let handle = app.clone();
+            let task = tauri::async_runtime::spawn(async move {
+                run_one(handle, profile).await;
+            });
+            if let Ok(mut map) = watchers.tasks.lock() {
+                map.insert(id.clone(), Watcher { fingerprint, task });
+            }
+            logx::log("watch", &format!("watching {id}"));
+        }
+    });
 }
 
 /// Take or raise the connection this profile's gateway answers on, held
@@ -1178,13 +1214,28 @@ data: {\"b\":2}
 
     #[test]
     fn syncing_starts_what_is_watched_and_stops_what_is_not() {
-        let watched = ["a".to_string(), "b".to_string()];
-        let running = ["b".to_string(), "c".to_string()];
+        let pair = |id: &str, fp: &str| (id.to_string(), fp.to_string());
+        let watched = [pair("a", "fp1"), pair("b", "fp1")];
+        let running = [pair("b", "fp1"), pair("c", "fp1")];
         let (start, stop) = to_start_and_stop(&watched, &running);
         assert_eq!(start, vec!["a".to_string()]);
         assert_eq!(stop, vec!["c".to_string()], "c is no longer watched");
         // Idempotent: syncing twice starts nothing twice.
         let (start, stop) = to_start_and_stop(&watched, &watched);
         assert!(start.is_empty() && stop.is_empty());
+    }
+
+    #[test]
+    fn an_edited_profile_is_stopped_and_started_again() {
+        // The one this exists for: a watched profile pointed at another
+        // host (or port) while it ran. The task carries the old address
+        // until it is replaced, and a watcher tunnelling to the host it
+        // was started with is worse than no watcher at all.
+        let pair = |id: &str, fp: &str| (id.to_string(), fp.to_string());
+        let watched = [pair("a", "new")];
+        let running = [pair("a", "old")];
+        let (start, stop) = to_start_and_stop(&watched, &running);
+        assert_eq!(start, vec!["a".to_string()]);
+        assert_eq!(stop, vec!["a".to_string()], "and in that order");
     }
 }
