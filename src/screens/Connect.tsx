@@ -102,7 +102,19 @@ const gatewayActions = [
   { action: 'emergencyResume', label: 'gw.estopResume', confirm: null, needs: 'on' },
 ] as const
 
-type GatewayActionId = (typeof gatewayActions)[number]['action']
+/** The two the menu runs without an item of their own: «Включить журнал
+ *  событий» turns on whichever of them the gateway is missing. */
+type GatewayActionId =
+  | (typeof gatewayActions)[number]['action']
+  | 'enableObservability'
+  | 'enableLogPersistence'
+
+type GatewayFlags = {
+  estopEnabled: boolean
+  canResume: boolean
+  logsRecorded: boolean
+  logsPersisted: boolean
+}
 
 const importButtonClass = cn(
   'border-dashed bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground',
@@ -190,9 +202,7 @@ export default function Connect() {
    *  "Emergency stop is disabled" and only the one that enables it does
    *  anything. `undefined` = not asked yet or the ask failed — nothing is
    *  greyed out on a guess. */
-  const [security, setSecurity] = useState<
-    Record<string, { estopEnabled: boolean; canResume: boolean }>
-  >({})
+  const [security, setSecurity] = useState<Record<string, GatewayFlags>>({})
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -318,16 +328,50 @@ export default function Connect() {
    *  profile per session. Quiet: a failure (gateway down, no ssh) leaves the
    *  answer unknown and the items clickable, which is how they behaved
    *  before this existed. */
-  const probeEstop = async (profile: Profile) => {
-    if (profile.id in security) return
+  const readFlags = async (profile: Profile): Promise<GatewayFlags | null> => {
+    const known = security[profile.id]
+    if (known) return known
     try {
-      const flags = await invoke<{ estopEnabled: boolean; canResume: boolean }>(
-        'gateway_security',
-        { profile, lang },
-      )
+      const flags = await invoke<GatewayFlags>('gateway_flags', { profile, lang })
       setSecurity((m) => ({ ...m, [profile.id]: flags }))
+      return flags
     } catch {
-      /* unknown stays unknown */
+      return null /* unknown stays unknown */
+    }
+  }
+
+  /** Turn on what monitoring needs — and ONLY what is off. A gateway already
+   *  exporting to otel or prometheus must not be put back to `log` because a
+   *  menu item sets both keys blindly, and a gateway that did not answer gets
+   *  nothing set at all. */
+  const enableTelemetry = async (profile: Profile) => {
+    const label = t('gw.telemetry')
+    const flags = await readFlags(profile)
+    if (!flags) {
+      setActionResult({ label, text: t('gw.noAnswer') })
+      return
+    }
+    const steps: GatewayActionId[] = []
+    if (!flags.logsRecorded) steps.push('enableObservability')
+    if (!flags.logsPersisted) steps.push('enableLogPersistence')
+    if (steps.length === 0) return
+    setActionBusy(true)
+    const printed: string[] = []
+    try {
+      for (const action of steps) {
+        printed.push(
+          await invoke<string>('run_gateway_action', { profile, action, confirmed: false, lang }),
+        )
+      }
+      setSecurity((m) => ({
+        ...m,
+        [profile.id]: { ...flags, logsRecorded: true, logsPersisted: true },
+      }))
+      setActionResult({ label, text: printed.join('\n') })
+    } catch (e) {
+      setActionResult({ label, text: t('gw.failed', { e: String(e) }) })
+    } finally {
+      setActionBusy(false)
     }
   }
 
@@ -350,10 +394,11 @@ export default function Connect() {
       setError(null)
       setActionResult({ label, text })
       if (action === 'emergencyEnable')
-        setSecurity((m) => ({
-          ...m,
-          [profile.id]: { canResume: m[profile.id]?.canResume ?? true, estopEnabled: true },
-        }))
+        setSecurity((m) =>
+          m[profile.id]
+            ? { ...m, [profile.id]: { ...m[profile.id], estopEnabled: true } }
+            : m,
+        )
     } catch (e) {
       // NOT the error banner: that feeds the sticky "last error" the
       // diagnostics paste carries, and a failing command's message is built
@@ -513,7 +558,7 @@ export default function Connect() {
                       rest live behind the menu, so the card keeps room for
                       the profile's own line however long the host is. */}
                   <div className="flex shrink-0 items-center gap-2">
-                    <DropdownMenu onOpenChange={(open) => open && void probeEstop(p)}>
+                    <DropdownMenu onOpenChange={(open) => open && void readFlags(p)}>
                       <DropdownMenuTrigger asChild>
                         <Button
                           variant="outline"
@@ -545,6 +590,25 @@ export default function Connect() {
                         {/* Actions on the GATEWAY this profile reaches,
                             not on the profile itself. */}
                         <DropdownMenuLabel>{t('gw.title')}</DropdownMenuLabel>
+                        {/* Monitoring reads `GET /api/logs`, which serves
+                            nothing unless the gateway both records events
+                            and keeps them. */}
+                        <DropdownMenuItem
+                          disabled={
+                            actionBusy ||
+                            (security[p.id] !== undefined &&
+                              security[p.id].logsRecorded &&
+                              security[p.id].logsPersisted)
+                          }
+                          title={
+                            security[p.id]?.logsRecorded && security[p.id]?.logsPersisted
+                              ? t('gw.telemetryOn')
+                              : undefined
+                          }
+                          onSelect={() => void enableTelemetry(p)}
+                        >
+                          {t('gw.telemetry')}
+                        </DropdownMenuItem>
                         {gatewayActions.map((a) => {
                           // Greyed only on a KNOWN answer: `undefined` means
                           // the gateway was not asked, or could not answer.

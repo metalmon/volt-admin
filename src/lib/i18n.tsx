@@ -40,6 +40,9 @@ const ru: Dict = {
   'gw.title': 'Шлюз',
   'gw.rotate': 'Сбросить все сопряжения',
   'gw.run': 'Выполнить',
+  'gw.telemetry': 'Включить журнал событий',
+  'gw.telemetryOn': 'Журнал событий уже включён',
+  'gw.noAnswer': 'Шлюз не ответил: не знаю, что у него включено, и ничего не менял.',
   'gw.warn.noResume':
     'Снять эту остановку будет нечем: security.estop.require_otp_to_resume = true, а security.otp.enabled = false — voltd откажет и в снятии из приложения, и в CLI. Включите OTP или снимите требование до остановки.',
   'gw.estopEnable': 'Включить аварийную остановку',
@@ -128,6 +131,9 @@ const en: Dict = {
   'gw.title': 'Gateway',
   'gw.rotate': 'Revoke all pairings',
   'gw.run': 'Run it',
+  'gw.telemetry': 'Turn the event log on',
+  'gw.telemetryOn': 'The event log is already on',
+  'gw.noAnswer': 'The gateway did not answer: nothing is known about its settings, so nothing was changed.',
   'gw.warn.noResume':
     'Nothing will release this stop: security.estop.require_otp_to_resume = true while security.otp.enabled = false, and voltd refuses the resume — here and in the CLI. Turn OTP on, or drop the requirement, before stopping.',
   'gw.estopEnable': 'Turn the emergency stop on',

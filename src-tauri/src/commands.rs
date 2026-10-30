@@ -164,32 +164,36 @@ pub async fn run_gateway_action<R: Runtime>(
 }
 
 /// What the card's menu needs before it is drawn: whether this gateway's
-/// emergency stop is enabled, and whether an engaged one could be released.
+/// emergency stop is enabled, whether an engaged one could be released, and
+/// whether it records and keeps the events monitoring would watch.
+///
+/// Two filtered listings rather than one `config list`: the whole thing is
+/// four thousand lines and carries secret fields.
 ///
 /// Best-effort by design — a gateway that is down or unreachable answers
 /// with an error and the menu greys out nothing.
 #[command]
-pub async fn gateway_security<R: Runtime>(
+pub async fn gateway_flags<R: Runtime>(
     app: AppHandle<R>,
     profile: Profile,
     lang: Option<String>,
-) -> Result<crate::actions::SecurityFlags, String> {
+) -> Result<crate::actions::GatewayFlags, String> {
     let lang = Lang::from_code(lang.as_deref());
     let embedded = app
         .state::<Registry>()
         .peek(&profile.id, &profile.connection_fingerprint())
         .await
         .is_some_and(|h: Held| h.embedded);
-    let listing = crate::actions::run(
-        &profile,
+    let mut listing = String::new();
+    for action in [
         crate::actions::GatewayAction::SecurityConfig,
-        false,
-        None,
-        embedded,
-        lang,
-    )
-    .await?;
-    Ok(crate::actions::security_flags(&listing))
+        crate::actions::GatewayAction::ObservabilityConfig,
+    ] {
+        listing
+            .push_str(&crate::actions::run(&profile, action, false, None, embedded, lang).await?);
+        listing.push('\n');
+    }
+    Ok(crate::actions::gateway_flags(&listing))
 }
 
 /// Open another window on the Connect screen. The app is one process with

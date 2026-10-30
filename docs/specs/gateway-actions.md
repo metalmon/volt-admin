@@ -19,6 +19,7 @@ Chosen over a general "run a command on the gateway" (see Out of scope):
 | action | command | confirm |
 |---|---|---|
 | Revoke all pairings | `gateway get-paircode --rotate` | yes, naming what breaks |
+| Turn the event log on | `config set observability.backend log` and/or `config set observability.log_persistence rolling` | no |
 | Turn the emergency stop on | `config set security.estop.enabled true` | no |
 | Emergency stop | `estop --level kill-all` | yes, naming what stops |
 | Emergency stop — state | `estop status` | no |
@@ -40,7 +41,21 @@ its items answer "Emergency stop is disabled. Enable [security.estop].enabled
 takes nothing away, so it does not confirm; it writes one key and the gateway
 picks it up when it next reads its config.
 
-The menu reads `config list --filter security` when it opens and greys out
+**The event log is what monitoring reads.** `GET /api/logs` serves nothing
+unless the gateway both records events (`observability.backend` is not
+`none`) and keeps them (`observability.log_persistence` is not `off`). One
+item turns on whichever of the two is off — and ONLY that one: a gateway
+exporting to `otel` or `prometheus` must not be put back to `log` because an
+item set both keys blindly, and a gateway that did not answer gets nothing
+set at all.
+
+`voltd config set` does not validate enum values: `log_persistence = zzz` is
+accepted and written (tried it, restored it). So every value these items
+write is a literal in `actions.rs`, never anything assembled from input, and
+nothing is ever set on a guess.
+
+The menu reads `config list --filter security` and `--filter observability`
+when it opens and greys out
 what cannot work: the three stop items while it is off, the item that
 turns it on while it is on. Only on an ANSWER — a gateway that is down or
 unreachable leaves them clickable, the way they were before the question

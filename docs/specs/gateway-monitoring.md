@@ -49,7 +49,13 @@ something that deserves a human — once per problem, not once per log line.
 
 The gateway already serves exactly what this needs, and nothing has to be
 parsed out of a text log (checked in the voltd sources,
-`crates/zeroclaw-gateway`):
+`crates/zeroclaw-gateway`, and then end to end against a live one: mint a
+code, `POST /api/pair`, `GET /api/logs?severity_min=13&hide_internal=true`
+with the token — answered with `events`, `next_cursor`,
+`next_cursor_line_offset`, `next_segment_cursor`, `at_end`, `incomplete`,
+`persistence_enabled`, `daemon_started_at`, `attribution_keys`, and each
+event carrying `id`, `@timestamp`, `severity_number`, `severity_text`,
+`event`, `message`, `service`, `attributes`):
 
 - **`GET /api/logs`** (`lib.rs`, routed to `api_logs::handle_api_logs`) — a
   paginated query over the persisted JSONL event store, with
@@ -168,6 +174,15 @@ their time and text, and a "mark as read" that clears the card.
 window, which the current model refuses by design: "Multi-copy model: no
 tray. Closing the window quits this copy" (`lib.rs`). Resolve that first —
 see Decide before building.
+
+## Turning the source on
+
+A gateway that records nothing (`observability.backend = none`) or keeps
+nothing (`observability.log_persistence = off`) has no log to watch, and
+`/api/logs` says so with `persistence_enabled: false`. The profile card's
+menu turns on whichever is off (`docs/specs/gateway-actions.md`), the same
+way it enables the emergency stop — so a gateway can be made watchable from
+here rather than by editing `config.toml` on the far end.
 
 ## Decide before building
 

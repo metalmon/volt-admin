@@ -163,7 +163,7 @@ pub fn run() {
             commands::new_window,
             commands::set_language,
             commands::run_gateway_action,
-            commands::gateway_security,
+            commands::gateway_flags,
             commands::delete_profile,
             commands::connect,
             commands::disconnect

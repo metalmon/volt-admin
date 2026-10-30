@@ -31,6 +31,14 @@ pub enum GatewayAction {
     /// whether the emergency stop is enabled at all, and whether an engaged
     /// one could be released again.
     SecurityConfig,
+    /// The gateway's observability settings, read with the above: without
+    /// a recording backend and a persisted log there is nothing for
+    /// `GET /api/logs` to serve, and so nothing to watch.
+    ObservabilityConfig,
+    /// Record events at all (`backend = none` records nothing).
+    EnableObservability,
+    /// Keep them, so `/api/logs` can serve a window of them.
+    EnableLogPersistence,
     /// Turn the emergency stop ON in the gateway's config — it ships
     /// disabled, and the other three answer "Emergency stop is disabled"
     /// until it is.
@@ -49,6 +57,9 @@ impl GatewayAction {
         match self {
             Self::RotatePairing => "gateway get-paircode --rotate",
             Self::SecurityConfig => "config list --filter security",
+            Self::ObservabilityConfig => "config list --filter observability",
+            Self::EnableObservability => "config set observability.backend log",
+            Self::EnableLogPersistence => "config set observability.log_persistence rolling",
             Self::EmergencyEnable => "config set security.estop.enabled true",
             Self::EmergencyStop => "estop --level kill-all",
             Self::EmergencyStatus => "estop status",
@@ -164,7 +175,7 @@ fn safe_error(action: GatewayAction, e: String, lang: Lang) -> String {
 /// What the menu needs to know before it is drawn.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SecurityFlags {
+pub struct GatewayFlags {
     /// `security.estop.enabled` — until this is true, every stop item just
     /// answers "Emergency stop is disabled".
     pub estop_enabled: bool,
@@ -172,6 +183,12 @@ pub struct SecurityFlags {
     /// needs an OTP that is switched off — voltd then refuses the resume,
     /// and a stop engaged in that state has no way back from here.
     pub can_resume: bool,
+    /// `observability.backend` records something at all. `none` records
+    /// nothing, and then no log exists to watch.
+    pub logs_recorded: bool,
+    /// `observability.log_persistence` keeps what was recorded. Without it
+    /// `GET /api/logs` answers `persistence_enabled: false`.
+    pub logs_persisted: bool,
 }
 
 /// Read the three lines that matter out of `config list --filter security`.
@@ -179,8 +196,8 @@ pub struct SecurityFlags {
 /// Absent or unreadable keys claim NOTHING: no greying, no warning. The
 /// probe is best-effort (the gateway may be down), and a guess in either
 /// direction is worse than silence.
-pub fn security_flags(listing: &str) -> SecurityFlags {
-    let flag = |key: &str| -> Option<bool> {
+pub fn gateway_flags(listing: &str) -> GatewayFlags {
+    let value = |key: &str| -> Option<&str> {
         listing
             .lines()
             .map(str::trim)
@@ -189,12 +206,16 @@ pub fn security_flags(listing: &str) -> SecurityFlags {
             .nth(1)?
             .split_whitespace()
             .next()
-            .map(|v| v == "true")
     };
-    SecurityFlags {
+    let flag = |key: &str| value(key).map(|v| v == "true");
+    GatewayFlags {
         estop_enabled: flag("security.estop.enabled") == Some(true),
         can_resume: !(flag("security.estop.require_otp_to_resume") == Some(true)
             && flag("security.otp.enabled") == Some(false)),
+        // An unreadable setting claims nothing: only the value that says
+        // "records nothing" / "keeps nothing" counts as off.
+        logs_recorded: value("observability.backend") != Some("none"),
+        logs_persisted: value("observability.log_persistence") != Some("off"),
     }
 }
 
@@ -253,6 +274,9 @@ mod tests {
   security.otp.enabled                 = false        (bool)
   security.estop.enabled               = true         (bool)
   security.estop.require_otp_to_resume = true         (bool)
+Observability:
+  observability.backend                = log          (ObservabilityBackend)
+  observability.log_persistence        = rolling      (LogPersistence)
 ";
 
     #[test]
@@ -260,7 +284,7 @@ mod tests {
         // The trap this exists for: estop on, resume gated behind an OTP
         // that is off. Engaging then stops the deployment with nothing in
         // the app — or the CLI — able to resume it.
-        let flags = security_flags(LISTING);
+        let flags = gateway_flags(LISTING);
         assert!(flags.estop_enabled);
         assert!(!flags.can_resume);
 
@@ -268,21 +292,49 @@ mod tests {
             "otp.enabled                 = false",
             "otp.enabled                 = true",
         );
-        assert!(security_flags(&with_otp).can_resume);
+        assert!(gateway_flags(&with_otp).can_resume);
         let no_gate = LISTING.replace(
             "require_otp_to_resume = true",
             "require_otp_to_resume = false",
         );
-        assert!(security_flags(&no_gate).can_resume);
+        assert!(gateway_flags(&no_gate).can_resume);
+    }
+
+    #[test]
+    fn a_gateway_that_records_nothing_has_nothing_to_watch() {
+        // The two settings monitoring needs, and the two values that mean
+        // "off" — everything else (log, verbose, prometheus, otel; rolling,
+        // single) records and keeps something.
+        let on = gateway_flags(LISTING);
+        assert!(on.logs_recorded && on.logs_persisted);
+        let silent = LISTING.replace(
+            "backend                = log",
+            "backend                = none",
+        );
+        assert!(!gateway_flags(&silent).logs_recorded);
+        let forgetful = LISTING.replace(
+            "log_persistence        = rolling",
+            "log_persistence        = off",
+        );
+        assert!(!gateway_flags(&forgetful).logs_persisted);
+        let otel = LISTING.replace(
+            "backend                = log",
+            "backend                = otel",
+        );
+        assert!(gateway_flags(&otel).logs_recorded, "otel records too");
     }
 
     #[test]
     fn a_listing_that_says_nothing_claims_nothing() {
         // An unreadable or empty answer must not grey out the menu or warn
         // about a trap: unknown is not "false".
-        let flags = security_flags("");
+        let flags = gateway_flags("");
         assert!(!flags.estop_enabled);
         assert!(flags.can_resume, "no evidence of a gate is not a gate");
+        assert!(
+            flags.logs_recorded && flags.logs_persisted,
+            "unknown is not off"
+        );
     }
 
     #[test]
