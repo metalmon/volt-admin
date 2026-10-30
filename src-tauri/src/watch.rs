@@ -35,6 +35,15 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 /// reconnecting costs one catch-up fetch, which is cheap enough to do on
 /// a schedule rather than wonder.
 const QUIET: Duration = Duration::from_secs(5 * 60);
+/// How long one stream is kept before it is recycled, however healthy it
+/// is. The stream carries the DAEMON's own events; anything a separate
+/// `voltd` process writes into the same trace — someone at a terminal, or
+/// this app's own menu actions — never passes through it, and a stream
+/// that keeps answering (the gateway sends keep-alives, so it does) means
+/// the catch-up would otherwise never run again. Checked on a live
+/// gateway: a CLI-written warning stayed invisible while the stream sat
+/// healthy.
+const RENEW: Duration = Duration::from_secs(10 * 60);
 /// How long a tunnel may take to come up before it counts as refused.
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(30);
 /// What to wait before trying again, in order, then the last one forever.
@@ -737,10 +746,22 @@ async fn attach<R: Runtime>(
     // test could not say which it was watching.
     let mut chunks = 0usize;
     let mut kept = 0usize;
+    let until = Instant::now() + RENEW;
     loop {
         // The silence floor, not a request timeout: there is no heartbeat
         // to tell a quiet gateway from a dead connection.
-        match tokio::time::timeout(QUIET, stream.chunk()).await {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            logx::log(
+                "watch",
+                &format!(
+                    "{}: stream recycled ({chunks} chunk(s), {kept} event(s))",
+                    p.id
+                ),
+            );
+            return Ok(());
+        }
+        match tokio::time::timeout(QUIET.min(left), stream.chunk()).await {
             Ok(Ok(Some(bytes))) => {
                 let text = String::from_utf8_lossy(&bytes);
                 let events: Vec<Event> = frames

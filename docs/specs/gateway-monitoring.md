@@ -248,9 +248,17 @@ What the stream will and will not do, all checked against a live gateway:
   reason the poll already had: the daemon's own failures are `internal`.
 - **Frames carry only `data:`** — no `id:`, so no `Last-Event-ID` resume.
   That is why the catch-up fetch exists.
-- **There is no heartbeat.** A gateway with nothing to say and a connection
-  that died look identical from here, so the stream is recycled after five
-  minutes of silence; the catch-up on reconnect makes that free.
+- **The stream carries the DAEMON's own events, and only those.** Anything
+  a separate `voltd` process writes into the same trace — someone at a
+  terminal, this app's own menu actions — reaches the watcher through the
+  catch-up and never through the stream. Found on the test stand: a brand
+  new CLI-written warning stayed invisible while the stream sat healthy,
+  and the same gateway delivered a daemon-side cron failure in seconds.
+- **There IS a keep-alive after all** (a bare comment every few seconds),
+  which is what makes the point above bite: a connection that keeps
+  answering never trips the silence floor, so the catch-up would never run
+  again. The stream is therefore recycled every ten minutes however healthy
+  it looks, and five minutes of true silence still ends it early.
 
 ## Watching through a tunnel
 
