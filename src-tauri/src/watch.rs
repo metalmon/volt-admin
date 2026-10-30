@@ -147,6 +147,75 @@ pub fn logs_url(base: &str) -> String {
     format!("{base}/api/logs?severity_min={SEVERITY_MIN}&hide_internal=false&limit={LIMIT}")
 }
 
+/// The live stream of the same events (`text/event-stream`).
+///
+/// No query at all. Checked against a live gateway: it IGNORES
+/// `severity_min` (asked for 17, sent a 13), and `hide_internal=true` it
+/// honours — which would hide the daemon's own failures, the one thing
+/// this is here to see. Everything is filtered on this side.
+pub fn events_url(base: &str) -> String {
+    format!("{base}/api/events")
+}
+
+/// Server-Sent Events, chunk by chunk.
+///
+/// A frame ends at a blank line and a chunk ends wherever the network
+/// decided, so the two have nothing to do with each other: what is left
+/// over stays in the buffer until the rest of it arrives.
+#[derive(Default)]
+pub struct Frames {
+    buffer: String,
+}
+
+impl Frames {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add `chunk` and take out every frame that is now complete, as the
+    /// text its `data:` lines carry.
+    pub fn feed(&mut self, chunk: &str) -> Vec<String> {
+        self.buffer.push_str(chunk);
+        let mut out = Vec::new();
+        // A frame boundary is a blank line, in either line ending:
+        // nothing says a gateway will not send CRLF.
+        while let Some(end) = self
+            .buffer
+            .find(
+                "
+
+",
+            )
+            .map(|i| (i, 2))
+            .or_else(|| {
+                self.buffer
+                    .find(
+                        "
+
+",
+                    )
+                    .map(|i| (i, 4))
+            })
+        {
+            let frame: String = self.buffer.drain(..end.0 + end.1).collect();
+            let payload: Vec<&str> = frame
+                .lines()
+                // `:` is a comment (keep-alives are sent as one), and every
+                // other field — `event:`, `id:`, `retry:` — is not data.
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim)
+                .collect();
+            if !payload.is_empty() {
+                out.push(payload.join(
+                    "
+",
+                ));
+            }
+        }
+        out
+    }
+}
+
 /// What makes two events the same PROBLEM: the text, not the id.
 ///
 /// The same complaint arrives every 15 seconds with a fresh id — 38 of 40
@@ -754,6 +823,76 @@ mod tests {
         assert_eq!(
             due_problems(&[same("f")], &said, much_later, window).len(),
             1
+        );
+    }
+
+    #[test]
+    fn a_frame_split_across_chunks_is_read_once() {
+        // The ordinary case on a slow link: a frame arrives in pieces.
+        let mut frames = Frames::new();
+        assert!(frames.feed("data: {\"message\":\"a\"").is_empty());
+        assert_eq!(
+            frames.feed(
+                "}
+
+"
+            ),
+            vec![r#"{"message":"a"}"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn several_frames_in_one_chunk_all_arrive() {
+        let mut frames = Frames::new();
+        let got = frames.feed(
+            "data: {\"a\":1}
+
+data: {\"b\":2}
+
+",
+        );
+        assert_eq!(
+            got,
+            vec![r#"{"a":1}"#.to_string(), r#"{"b":2}"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn a_comment_or_a_blank_line_is_not_an_event() {
+        // SSE keep-alives are comments; a watcher that treated one as an
+        // event would report an empty problem every time one arrived.
+        let mut frames = Frames::new();
+        assert!(frames
+            .feed(
+                ":keep-alive
+
+"
+            )
+            .is_empty());
+        assert!(frames
+            .feed(
+                "
+
+"
+            )
+            .is_empty());
+        assert!(frames
+            .feed(
+                "event: ping
+
+"
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn the_stream_url_asks_for_no_filtering() {
+        // Checked against a live gateway: `severity_min` is ignored here,
+        // and `hide_internal=true` hides the daemon's own failures — the
+        // one thing this exists to see.
+        assert_eq!(
+            events_url("http://127.0.0.1:42617"),
+            "http://127.0.0.1:42617/api/events"
         );
     }
 
