@@ -896,21 +896,54 @@ pub fn seen<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
 
 /// Hand a window this profile and bring it forward.
 ///
+/// Two cases, and the first one is the common one: a window is ALREADY
+/// showing that gateway's panel. There is no React in it — it is the
+/// gateway's own page — so an event has nobody to catch it, and the click
+/// did nothing until some later window happened to pick it up. That window
+/// is navigated straight to the log page instead.
+///
+/// Otherwise the profile waits in `Clicked` for the Connect screen to ask
+/// for it on mount, and an open Connect screen gets the event.
+///
 /// Windows-only for now, because only the Windows toast carries a click
 /// back to us — the plugin's notifications on the other platforms do not,
 /// and a function nothing calls is a warning the build refuses.
-///
-/// Both halves are needed: the state for a window that does not exist yet
-/// (the Connect screen asks on mount), the event for one that does and is
-/// already past its mount.
 #[cfg(windows)]
 pub fn open_for<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
-    if let Ok(mut clicked) = app.state::<Clicked>().0.lock() {
-        *clicked = Some(profile_id.to_string());
-    }
     logx::log("watch", &format!("{profile_id}: notification clicked"));
-    crate::windows::show_a_window(app);
-    let _ = app.emit("watch:open", profile_id.to_string());
+    let app = app.clone();
+    let wanted = profile_id.to_string();
+    // Async because the registry is: the click arrives on a notification
+    // thread that must not block.
+    tauri::async_runtime::spawn(async move {
+        let origin = app
+            .state::<Registry>()
+            .local_port(&wanted)
+            .await
+            .map(|port| format!("http://127.0.0.1:{port}"));
+        let showing = origin.as_ref().and_then(|o| {
+            app.webview_windows()
+                .values()
+                .find(|w| w.url().is_ok_and(|u| crate::pair::same_origin(&u, o)))
+                .cloned()
+        });
+        if let (Some(window), Some(origin)) = (showing, origin) {
+            let url = format!("{origin}{}", crate::commands::panel_page(Some("logs")));
+            logx::log("watch", &format!("{wanted}: showing the log page"));
+            let _ = app.run_on_main_thread(move || {
+                if let Ok(url) = tauri::Url::parse(&url) {
+                    let _ = window.navigate(url);
+                }
+                let _ = window.set_focus();
+            });
+            return;
+        }
+        if let Ok(mut clicked) = app.state::<Clicked>().0.lock() {
+            *clicked = Some(wanted.clone());
+        }
+        crate::windows::show_a_window(&app);
+        let _ = app.emit("watch:open", wanted);
+    });
 }
 
 #[cfg(not(windows))]

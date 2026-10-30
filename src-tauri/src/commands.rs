@@ -407,7 +407,7 @@ pub fn delete_profile(app: AppHandle, id: String) -> Result<(), String> {
 /// An allow-list, not the string handed in: the value reaches a
 /// `window.navigate` on the panel's own origin, where a crafted path is a
 /// request made as the signed-in administrator.
-fn panel_page(page: Option<&str>) -> &'static str {
+pub(crate) fn panel_page(page: Option<&str>) -> &'static str {
     match page {
         Some("logs") => "/logs",
         _ => "/",
