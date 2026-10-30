@@ -9,6 +9,7 @@ mod settings;
 mod tray;
 mod tunnel;
 mod tunnel_embedded;
+mod watch;
 mod windows;
 
 // NOTE (was M1 TODO): the panel is no longer loaded in an `<iframe>` — the
