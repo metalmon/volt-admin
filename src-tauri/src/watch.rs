@@ -710,12 +710,18 @@ async fn attach<R: Runtime>(
     digest(app, p, &poll.events, seen_ids, said);
 
     // 2. What is happening, for as long as it keeps happening.
-    let stream = client
-        .get(events_url(base))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| Attach::Unreachable(format!("stream refused ({e})")))?;
+    //
+    // BOUNDED, unlike the read that follows: `send` resolves when the
+    // headers arrive, and a gateway that accepts the connection and then
+    // says nothing would otherwise wedge this watcher for ever with no
+    // line in the log to show for it. The read below is what may wait.
+    let stream = tokio::time::timeout(
+        TIMEOUT,
+        client.get(events_url(base)).bearer_auth(token).send(),
+    )
+    .await
+    .map_err(|_| Attach::Unreachable("stream handshake hung".to_string()))?
+    .map_err(|e| Attach::Unreachable(format!("stream refused ({e})")))?;
     if stream.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(Attach::Unauthorized);
     }
@@ -723,8 +729,14 @@ async fn attach<R: Runtime>(
         return Err(Attach::Unreachable(format!("stream {}", stream.status())));
     }
     mark(app, p, None);
+    logx::log("watch", &format!("{}: stream attached", p.id));
     let mut stream = stream;
     let mut frames = Frames::new();
+    // Counted so the log can tell "nothing is wrong" from "nothing is
+    // arriving" — they look identical from outside, and the first live
+    // test could not say which it was watching.
+    let mut chunks = 0usize;
+    let mut kept = 0usize;
     loop {
         // The silence floor, not a request timeout: there is no heartbeat
         // to tell a quiet gateway from a dead connection.
@@ -740,13 +752,24 @@ async fn attach<R: Runtime>(
                     // ignored on it, so the floor is applied here.
                     .filter(|e| e.severity >= SEVERITY_MIN)
                     .collect();
+                chunks += 1;
+                kept += events.len();
                 if !events.is_empty() {
                     digest(app, p, &events, seen_ids, said);
                 }
             }
             // Ended, failed, or said nothing for five minutes: all three
             // mean "reconnect and catch up", which costs one fetch.
-            _ => return Ok(()),
+            _ => {
+                logx::log(
+                    "watch",
+                    &format!(
+                        "{}: stream ended ({chunks} chunk(s), {kept} event(s))",
+                        p.id
+                    ),
+                );
+                return Ok(());
+            }
         }
     }
 }
