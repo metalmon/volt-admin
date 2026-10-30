@@ -3,8 +3,8 @@
 //! The gateway serves structured events — an `id`, a severity, a message —
 //! so nothing here parses a text log (`docs/specs/gateway-monitoring.md`,
 //! verified against a live gateway). What this module decides is what a
-//! poll MEANS: which events are new, where the next poll starts, and when
-//! the cursor has to be thrown away.
+//! poll MEANS: which lines are new, which of them are the same problem
+//! repeating, and which are worth interrupting someone for.
 //!
 //! NOTHING HERE LOGS AN EVENT'S TEXT or the token that fetched it. The log
 //! carries counts and outcomes (`docs/specs/diagnostics.md`).
@@ -13,10 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tauri_plugin_notification::NotificationExt;
-
 use crate::tunnel::Lang;
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,10 +39,6 @@ const SAY_AGAIN: Duration = Duration::from_secs(30 * 60);
 const SEEN_MAX: usize = 1000;
 
 /// One event, as the gateway recorded it.
-///
-/// No `id`: the gateway gives every occurrence its own, and the same
-/// complaint repeating every 15 seconds arrives with 38 of them. What
-/// identifies a PROBLEM here is the message (see `problem`).
 #[derive(Debug, Clone, Default)]
 pub struct Event {
     /// The gateway's id for this OCCURRENCE. Unique per line, so it is what
@@ -93,7 +87,8 @@ fn read_event(v: &serde_json::Value) -> Event {
 }
 
 impl Event {
-    /// Error or worse. Warnings are counted; errors are announced.
+    /// Error or worse. Both are announced — what a failing cron job logs
+    /// is a Warn — but errors are what the notification counts first.
     pub fn is_error(&self) -> bool {
         self.severity >= SEVERITY_ERROR
     }
@@ -450,24 +445,30 @@ fn report<R: Runtime>(app: &AppHandle<R>, p: &crate::connection::Profile, fresh:
 
 /// ONE notification per poll, however much the poll brought back.
 ///
-/// That is the whole point of the cursor: a laptop that slept for six hours
-/// wakes to a backlog, and six hours of errors must arrive as "17 errors on
-/// VoltLocal", not as seventeen notifications.
+/// A laptop that slept for six hours wakes to a backlog, and six hours of
+/// trouble must arrive as "17 problems on VoltLocal", not as seventeen
+/// toasts.
+///
+/// WARNINGS COUNT. What a failing cron job logs is a Warn, not an Error
+/// (checked on a live gateway), so an `announce` that interrupted only for
+/// errors said nothing at all — which is what the first watched build did.
+/// `due_problems` has already collapsed the repeats, so everything here is
+/// something this watcher has not mentioned lately.
 fn announce<R: Runtime>(app: &AppHandle<R>, lang: Lang, profile_name: &str, fresh: &[Event]) {
-    let errors: Vec<&Event> = fresh.iter().filter(|e| e.is_error()).collect();
-    let Some(newest) = errors.first() else {
-        return; // warnings go to the tray; only errors interrupt
+    let errors = fresh.iter().filter(|e| e.is_error()).count();
+    let Some(newest) = fresh
+        .iter()
+        .find(|e| e.is_error())
+        .or_else(|| fresh.first())
+    else {
+        return;
     };
-    let title = match lang {
-        Lang::Ru => format!(
-            "{profile_name}: {}",
-            crate::tray::errors_phrase(lang, errors.len())
-        ),
-        Lang::En => format!(
-            "{profile_name}: {}",
-            crate::tray::errors_phrase(lang, errors.len())
-        ),
+    let count = if errors > 0 {
+        crate::tray::errors_phrase(lang, errors)
+    } else {
+        crate::tray::warnings_phrase(lang, fresh.len())
     };
+    let title = format!("{profile_name}: {count}");
     // The BODY is the gateway's own message — the thing the administrator
     // needs — and it still never reaches our log (see `report`).
     let body = if newest.service.is_empty() {
@@ -475,9 +476,49 @@ fn announce<R: Runtime>(app: &AppHandle<R>, lang: Lang, profile_name: &str, fres
     } else {
         format!("{}: {}", newest.service, newest.message)
     };
-    if let Err(e) = app.notification().builder().title(title).body(body).show() {
-        logx::log("watch", &format!("notification refused ({e})"));
+    match toast(app, &title, &body) {
+        // Counts only, never the text — but DO say that it went out. The
+        // first build logged nothing on success, so "no notification
+        // appeared" had no evidence on either side of the glass.
+        Ok(()) => logx::log(
+            "watch",
+            &format!("{profile_name}: notified ({})", fresh.len()),
+        ),
+        Err(e) => logx::log("watch", &format!("notification refused ({e})")),
     }
+}
+
+/// Raise one notification.
+///
+/// On Windows this bypasses `tauri-plugin-notification` for two reasons
+/// found the hard way: its `show()` returned success while nothing appeared
+/// — no error to read, nothing to chase — and it cannot ask for a toast
+/// that STAYS. A watcher exists to be seen by someone who stepped away, so
+/// the toast is a reminder: pre-expanded, on screen until dismissed.
+#[cfg(windows)]
+fn toast<R: Runtime>(app: &AppHandle<R>, title: &str, body: &str) -> Result<(), String> {
+    use tauri_winrt_notification::{Duration as ToastDuration, Scenario, Toast};
+    // The AppUserModelID Windows matches against the Start-menu shortcut
+    // the installer stamps (see `installer-hooks.nsi`). Missing or wrong,
+    // and the toast is dropped in silence.
+    Toast::new(&app.config().identifier)
+        .title(title)
+        .text1(body)
+        .scenario(Scenario::Reminder)
+        .duration(ToastDuration::Long)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn toast<R: Runtime>(app: &AppHandle<R>, title: &str, body: &str) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 /// Why a watcher stopped. A CATEGORY, never an error's text: this reaches

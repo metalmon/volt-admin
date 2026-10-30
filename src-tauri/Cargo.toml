@@ -34,6 +34,12 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
 # the OS reaps it whenever this process ends — even on a hard kill that skips
 # Rust's Drop — instead of leaking a child that keeps the local port bound.
 [target.'cfg(windows)'.dependencies]
+# The toast, directly. `tauri-plugin-notification` (kept for the other
+# platforms) cannot say "stay on screen until dismissed", which is the whole
+# point of a watcher's notification — and its own call showed nothing here
+# while reporting success, with no error to read.
+tauri-winrt-notification = "0.8"
+
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 # Linux: `prctl(PR_SET_PDEATHSIG)` gives the same "die with the app" guarantee
