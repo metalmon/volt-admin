@@ -203,6 +203,12 @@ pub fn watch_board<R: Runtime>(app: AppHandle<R>) -> Vec<crate::watch::Status> {
     app.state::<crate::watch::Board>().all()
 }
 
+/// Mark this gateway's problems as seen — the card's count goes quiet.
+#[command]
+pub fn watch_seen<R: Runtime>(app: AppHandle<R>, profile_id: String) {
+    crate::watch::seen(&app, &profile_id);
+}
+
 /// The profile a clicked notification asked for, if a click is waiting.
 /// Taken, not read: one click opens one gateway, once.
 #[command]
@@ -696,6 +702,10 @@ pub async fn connect<R: Runtime>(
     logx::log("connect", &format!("navigate to {panel_url}"));
     let url = tauri::Url::parse(&panel_url).map_err(|e| e.to_string())?;
     navigate(&window, url)?;
+
+    // Opening the panel is looking at the gateway: whatever its watcher
+    // had counted up is no longer unseen (`crate::watch`).
+    crate::watch::seen(&app, &profile.id);
 
     // Connection identity in the OS title bar, per window.
     let _ = window.set_title(&format!(

@@ -283,6 +283,19 @@ are:
   all. The `connection_fingerprint` is kept beside the task, and a change
   to it is a stop followed by a start.
 
+## What the number on the card means
+
+UNSEEN problems, not a running total. It is cleared when someone looks at
+that gateway — a window connecting to it, or a click on the line itself —
+the way an unread count is. A counter that only ever grows says
+"предупреждений: 412" by the second day and has stopped carrying
+information; what the administrator needs to know is whether anything has
+happened that they have not looked at.
+
+The counts live in memory, so a restart clears them too. That is honest:
+after a restart nothing has been missed, because the catch-up fetch
+re-reads the gateway's own window from scratch.
+
 ## Turning the source on
 
 A gateway that records nothing (`observability.backend = none`) or keeps

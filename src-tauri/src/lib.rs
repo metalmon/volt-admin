@@ -168,6 +168,7 @@ pub fn run() {
             commands::gateway_flags,
             commands::watch_board,
             commands::take_watch_click,
+            commands::watch_seen,
             commands::delete_profile,
             commands::connect,
             commands::disconnect

@@ -333,6 +333,21 @@ impl Board {
         }
     }
 
+    /// Zero the counts, keeping whatever is wrong with the watching
+    /// itself. What they count is UNSEEN problems — once someone has
+    /// looked at the gateway there is nothing unseen left, and a number
+    /// that only ever grows stops meaning anything by the second day.
+    fn clear_counts(&self, profile_id: &str) -> Option<Status> {
+        let mut board = self.0.lock().ok()?;
+        let status = board.get_mut(profile_id)?;
+        if status.errors == 0 && status.warnings == 0 {
+            return None;
+        }
+        status.errors = 0;
+        status.warnings = 0;
+        Some(status.clone())
+    }
+
     fn drop_profile(&self, profile_id: &str) {
         if let Ok(mut board) = self.0.lock() {
             board.remove(profile_id);
@@ -868,6 +883,15 @@ fn toast<R: Runtime>(
         })
         .show()
         .map_err(|e| e.to_string())
+}
+
+/// Someone is looking at this gateway: nothing it has said is unseen any
+/// more. Called when a window connects to it, and when the card's own
+/// line is clicked.
+pub fn seen<R: Runtime>(app: &AppHandle<R>, profile_id: &str) {
+    if let Some(status) = app.state::<Board>().clear_counts(profile_id) {
+        let _ = app.emit("watch", status);
+    }
 }
 
 /// Hand a window this profile and bring it forward.

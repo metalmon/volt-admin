@@ -619,9 +619,21 @@ export default function Connect() {
                         never nothing at all, because silence is also what a
                         broken watcher looks like. */}
                     {p.watch && (
-                      <span
+                      <button
+                        type="button"
+                        title={
+                          watched[p.id]?.errors || watched[p.id]?.warnings
+                            ? t('watch.clear')
+                            : undefined
+                        }
+                        onClick={() => {
+                          void invoke('watch_seen', { profileId: p.id })
+                          setWatched((m) =>
+                            m[p.id] ? { ...m, [p.id]: { ...m[p.id], errors: 0, warnings: 0 } } : m,
+                          )
+                        }}
                         className={cn(
-                          'truncate text-xs',
+                          'truncate text-start text-xs',
                           watched[p.id]?.trouble
                             ? 'text-destructive'
                             : watched[p.id]?.errors
@@ -637,7 +649,7 @@ export default function Connect() {
                                 w: watched[p.id].warnings,
                               })
                             : t('watch.quiet')}
-                      </span>
+                      </button>
                     )}
                   </div>
                   {/* Fluent: secondary/dismissive action on the left, primary
