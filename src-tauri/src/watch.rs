@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
@@ -33,6 +33,9 @@ const LIMIT: u16 = 200;
 const EVERY: Duration = Duration::from_secs(60);
 /// How long one poll may take before it is a failure.
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a problem stays said. The same complaint repeats every 15
+/// seconds; a failure that comes back after this is news again.
+const SAY_AGAIN: Duration = Duration::from_secs(30 * 60);
 /// How many ids are remembered for deduplication. A gateway logs forever;
 /// this process must not grow with it.
 const SEEN_MAX: usize = 1000;
@@ -44,6 +47,10 @@ const SEEN_MAX: usize = 1000;
 /// identifies a PROBLEM here is the message (see `problem`).
 #[derive(Debug, Clone, Default)]
 pub struct Event {
+    /// The gateway's id for this OCCURRENCE. Unique per line, so it is what
+    /// says "not seen before" — but not what says "a different problem",
+    /// which is the message (see `problem`).
+    pub id: String,
     pub severity: u8,
     pub message: String,
     /// `service.name` — on the wire `service` is an OBJECT
@@ -69,6 +76,7 @@ fn read_event(v: &serde_json::Value) -> Event {
             .to_string()
     };
     Event {
+        id: text("/id"),
         severity: v
             .get("severity_number")
             .and_then(|s| s.as_u64())
@@ -91,25 +99,15 @@ impl Event {
     }
 }
 
-/// Where the next poll starts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cursor {
-    pub segment: String,
-    pub line_offset: u64,
-}
-
 /// What one poll answered.
 #[derive(Debug, Clone)]
 pub struct Poll {
     pub events: Vec<Event>,
-    pub cursor: Option<Cursor>,
     /// False = this gateway keeps no log. There is nothing to watch here,
     /// and silence must not be read as health.
     pub persistence_enabled: bool,
     /// Part of the window was dropped by the gateway's own retention.
     pub incomplete: bool,
-    /// Changes when the daemon restarts, which invalidates the cursor.
-    pub daemon_started_at: Option<String>,
 }
 
 /// The wire shape. Everything is optional: a field voltd adds or omits
@@ -120,77 +118,38 @@ struct Answer {
     #[serde(default)]
     events: Vec<serde_json::Value>,
     #[serde(default)]
-    next_segment_cursor: Option<String>,
-    #[serde(default)]
-    next_cursor_line_offset: Option<u64>,
-    #[serde(default)]
     persistence_enabled: bool,
     #[serde(default)]
     incomplete: bool,
-    #[serde(default)]
-    daemon_started_at: Option<String>,
 }
 
 /// Read one answer. An error here is a BROKEN answer, never an unwelcome
 /// one: "this gateway keeps nothing" is a `Poll`, not an `Err`.
 pub fn parse_poll(json: &str) -> Result<Poll, String> {
     let a: Answer = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    let cursor = a
-        .next_segment_cursor
-        .filter(|s| !s.is_empty())
-        .map(|segment| Cursor {
-            segment,
-            line_offset: a.next_cursor_line_offset.unwrap_or(0),
-        });
     Ok(Poll {
         events: a.events.iter().map(read_event).collect(),
-        cursor,
         persistence_enabled: a.persistence_enabled,
         incomplete: a.incomplete,
-        daemon_started_at: a.daemon_started_at,
     })
 }
 
-/// The URL of the next poll. Without a cursor it asks for the newest page,
-/// which is also what a restarted daemon gets.
-pub fn logs_url(base: &str, cursor: Option<&Cursor>) -> String {
+/// The URL of a poll: always the NEWEST page.
+///
+/// There is a cursor in this API and it is not for this. `until_*` pages
+/// BACKWARDS — asked with the cursor the previous answer returned, the
+/// gateway hands back the events before it (checked against a live one:
+/// 12:49 first, then 12:48, then 12:47). A watcher built on it walks
+/// deeper into the past every minute and never sees today. Newness is
+/// decided here instead, by event id.
+pub fn logs_url(base: &str) -> String {
     // hide_internal=FALSE, and that is the whole point. Tried it the other
     // way against a live gateway: a cron job that failed logged
     // "Scheduler job '' failed" as a Warn of category `internal`, which
     // `hide_internal=true` drops — a watcher that hides the daemon's own
     // problems watches nothing. The noise that flag exists for (the same
     // warning every 15 seconds) is handled below, by message.
-    let mut url =
-        format!("{base}/api/logs?severity_min={SEVERITY_MIN}&hide_internal=false&limit={LIMIT}");
-    if let Some(c) = cursor {
-        url.push_str(&format!(
-            "&until_segment_cursor={}&until_line_offset={}",
-            escape(&c.segment),
-            c.line_offset
-        ));
-    }
-    url
-}
-
-/// Percent-encode a cursor for the query string. The cursor is the
-/// GATEWAY's string, not ours, and a space or an `&` in it would otherwise
-/// rewrite the request.
-fn escape(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
-}
-
-/// Did the daemon restart between these two polls? Only a CHANGE counts: a
-/// first poll has nothing to compare, and an answer that cannot say is not
-/// evidence of anything.
-pub fn fresh_start(prev: Option<&str>, now: Option<&str>) -> bool {
-    matches!((prev, now), (Some(a), Some(b)) if a != b)
+    format!("{base}/api/logs?severity_min={SEVERITY_MIN}&hide_internal=false&limit={LIMIT}")
 }
 
 /// What makes two events the same PROBLEM: the text, not the id.
@@ -203,30 +162,55 @@ fn problem(e: &Event) -> String {
     format!("{}|{}", e.severity, e.message)
 }
 
-/// The problems not seen before, in the order they arrived — one per
-/// distinct message, however many times it repeated inside this poll.
-pub fn unseen(events: &[Event], seen: &HashSet<String>) -> Vec<Event> {
-    let mut within = HashSet::new();
+/// The occurrences this watcher has not read yet, newest page or not.
+pub fn new_occurrences(events: &[Event], seen_ids: &HashSet<String>) -> Vec<Event> {
     events
         .iter()
-        .filter(|e| !seen.contains(&problem(e)) && within.insert(problem(e)))
+        .filter(|e| !seen_ids.contains(&e.id))
         .cloned()
         .collect()
 }
 
-/// Remember these ids, forgetting the oldest once the set is full.
+/// Which of those are worth saying out loud: one per distinct message, and
+/// only if that message has not been said within `window`.
+///
+/// The window is what makes a watcher bearable AND useful: the same
+/// complaint arrives every 15 seconds (157 copies in one real window), so
+/// saying it once is enough — but a failure that comes back an hour later
+/// is news again, and a watcher that said it once in the morning and never
+/// again is a watcher that missed it.
+pub fn due_problems(
+    events: &[Event],
+    said: &HashMap<String, Instant>,
+    now: Instant,
+    window: Duration,
+) -> Vec<Event> {
+    let mut within = HashSet::new();
+    events
+        .iter()
+        .filter(|e| {
+            let fresh = said
+                .get(&problem(e))
+                .is_none_or(|last| now.duration_since(*last) >= window);
+            fresh && within.insert(problem(e))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Remember these occurrences, forgetting the oldest once the set is full.
 ///
 /// "Oldest" is approximate on purpose — a `HashSet` has no order, and the
 /// alternative (a queue beside it) buys exactness nobody needs: the point
-/// is not to notify twice about an event that is still on screen.
-pub fn remember_seen(seen: &mut HashSet<String>, events: &[Event]) {
+/// is only not to read the same page twice.
+pub fn remember_seen(seen_ids: &mut HashSet<String>, events: &[Event]) {
     for e in events {
-        if seen.len() >= SEEN_MAX {
-            if let Some(victim) = seen.iter().next().cloned() {
-                seen.remove(&victim);
+        if seen_ids.len() >= SEEN_MAX {
+            if let Some(victim) = seen_ids.iter().next().cloned() {
+                seen_ids.remove(&victim);
             }
         }
-        seen.insert(problem(e));
+        seen_ids.insert(e.id.clone());
     }
 }
 
@@ -370,15 +354,14 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
         // (`docs/specs/diagnostics.md`).
         Err(_) => return give_up(&app, &p, Trouble::NoPairing),
     };
-    let mut cursor: Option<Cursor> = None;
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut started_at: Option<String> = None;
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut said: HashMap<String, Instant> = HashMap::new();
     // A revoked token is re-paired ONCE. Twice would be a watcher minting a
     // pairing code every minute against a gateway that keeps refusing it.
     let mut repaired = false;
     loop {
         let answer = client
-            .get(logs_url(&base, cursor.as_ref()))
+            .get(logs_url(&base))
             .bearer_auth(&token)
             .timeout(TIMEOUT)
             .send()
@@ -409,27 +392,24 @@ async fn run_one<R: Runtime>(app: AppHandle<R>, p: crate::connection::Profile) {
                             // be shown as health.
                             return give_up(&app, &p, Trouble::NoLog);
                         }
-                        if fresh_start(started_at.as_deref(), poll.daemon_started_at.as_deref()) {
-                            // The gateway restarted: the cursor points into
-                            // a store that no longer exists.
-                            cursor = None;
-                            seen.clear();
-                        }
                         if poll.incomplete {
                             // The gateway dropped part of its own window
                             // (retention): some events never reach anyone,
                             // and that is worth knowing when reading the log.
                             logx::log("watch", &format!("{}: window incomplete", p.id));
                         }
-                        started_at = poll.daemon_started_at.clone();
-                        cursor = poll.cursor.clone().or(cursor);
-                        let fresh = unseen(&poll.events, &seen);
-                        remember_seen(&mut seen, &poll.events);
+                        let now = Instant::now();
+                        let occurrences = new_occurrences(&poll.events, &seen_ids);
+                        remember_seen(&mut seen_ids, &poll.events);
+                        let fresh = due_problems(&occurrences, &said, now, SAY_AGAIN);
+                        for e in &fresh {
+                            said.insert(problem(e), now);
+                        }
+                        said.retain(|_, last| now.duration_since(*last) < SAY_AGAIN);
                         report(&app, &p, &fresh);
                     }
                     // A gateway that is down, or answering something else:
-                    // keep the cursor and try again next minute. Not a
-                    // reason to stop watching.
+                    // try again next minute. Not a reason to stop watching.
                     Err(e) => logx::log("watch", &format!("{}: poll unreadable ({e})", p.id)),
                 }
             }
@@ -578,19 +558,8 @@ mod tests {
         assert_eq!(poll.events[0].service, "zeroclaw");
         assert!(poll.events[0].is_error(), "severity 17 is an error");
         assert!(!poll.events[1].is_error(), "severity 13 is a warning");
-        assert_eq!(
-            poll.cursor,
-            Some(Cursor {
-                segment: "seg-7".into(),
-                line_offset: 42
-            })
-        );
         assert!(poll.persistence_enabled);
         assert!(!poll.incomplete);
-        assert_eq!(
-            poll.daemon_started_at.as_deref(),
-            Some("2026-10-29T21:03:32Z")
-        );
     }
 
     #[test]
@@ -625,7 +594,6 @@ mod tests {
             .expect("parses");
         assert!(!poll.persistence_enabled);
         assert!(poll.events.is_empty());
-        assert_eq!(poll.cursor, None);
     }
 
     #[test]
@@ -635,63 +603,72 @@ mod tests {
             r#"{"events":[],"persistence_enabled":true,"something_new":{"a":1},"at_end":true}"#,
         )
         .expect("parses");
-        assert_eq!(poll.cursor, None);
-        assert!(poll.daemon_started_at.is_none());
+        assert!(poll.events.is_empty());
     }
 
     #[test]
-    fn a_restarted_daemon_invalidates_the_cursor() {
-        assert!(fresh_start(Some("a"), Some("b")));
-        assert!(!fresh_start(Some("a"), Some("a")));
-        assert!(!fresh_start(None, Some("a")), "first poll is not a restart");
-        assert!(
-            !fresh_start(Some("a"), None),
-            "an answer that cannot say is not a restart"
-        );
-    }
-
-    #[test]
-    fn the_same_event_is_new_only_once() {
+    fn the_same_page_is_read_only_once() {
+        // Every poll asks for the newest page, so most of what comes back
+        // has already been read. The id says which lines are new.
         let poll = parse_poll(ANSWER).expect("parses");
         let mut seen = std::collections::HashSet::new();
-        assert_eq!(unseen(&poll.events, &seen).len(), 2);
+        assert_eq!(new_occurrences(&poll.events, &seen).len(), 2);
         remember_seen(&mut seen, &poll.events);
-        assert!(unseen(&poll.events, &seen).is_empty());
+        assert!(new_occurrences(&poll.events, &seen).is_empty());
     }
 
     #[test]
-    fn one_complaint_repeated_is_one_problem() {
+    fn one_complaint_repeated_is_said_once_until_it_goes_quiet() {
         // What a real gateway does: the same misconfiguration every 15
-        // seconds, a fresh id each time. By id that is 38 new problems in
-        // one poll; it is one.
-        let same = || Event {
+        // seconds, a fresh id each time — 157 copies in one window. One
+        // problem, said once.
+        let same = |id: &str| Event {
+            id: id.into(),
             severity: 13,
             message: "Cron job has no single owning agent".into(),
             service: String::new(),
         };
-        let events = vec![same(), same(), same()];
-        let mut seen = std::collections::HashSet::new();
-        let fresh = unseen(&events, &seen);
-        assert_eq!(fresh.len(), 1, "one message, one problem");
-        remember_seen(&mut seen, &events);
-        assert!(unseen(&events, &seen).is_empty(), "and not again next poll");
-        // A different message is a different problem, same severity or not.
+        let now = Instant::now();
+        let mut said = HashMap::new();
+        let window = Duration::from_secs(30 * 60);
+
+        let fresh = due_problems(&[same("a"), same("b"), same("c")], &said, now, window);
+        assert_eq!(fresh.len(), 1, "three occurrences, one problem");
+        said.insert(problem(&fresh[0]), now);
+
+        // Next poll, same complaint, new ids: nothing to say.
+        let later = now + Duration::from_secs(60);
+        assert!(due_problems(&[same("d")], &said, later, window).is_empty());
+
+        // A different message is a different problem, right away.
         let other = Event {
             message: "Scheduler job failed".into(),
-            ..same()
+            ..same("e")
         };
-        assert_eq!(unseen(&[other], &seen).len(), 1);
+        assert_eq!(due_problems(&[other], &said, later, window).len(), 1);
+
+        // And after the window, the old one is news again — a failure that
+        // comes back must not be swallowed because it once was mentioned.
+        let much_later = now + window + Duration::from_secs(1);
+        assert_eq!(
+            due_problems(&[same("f")], &said, much_later, window).len(),
+            1
+        );
     }
 
     #[test]
-    fn the_internal_events_are_not_hidden() {
-        // A cron job that failed logs a Warn of category `internal`; a
-        // watcher that asks the gateway to hide those watches nothing.
-        assert!(
-            logs_url("http://h", None).contains("hide_internal=false"),
-            "{}",
-            logs_url("http://h", None)
+    fn a_poll_always_asks_for_the_newest_page() {
+        // The API's cursor pages BACKWARDS (checked against a live gateway:
+        // the answer after the cursor was a minute older, not newer). A
+        // watcher that followed it walks into the past forever, which is
+        // exactly what the first build did. Internal events stay visible:
+        // a failed cron job is logged as one.
+        let url = logs_url("http://127.0.0.1:42617");
+        assert_eq!(
+            url,
+            "http://127.0.0.1:42617/api/logs?severity_min=13&hide_internal=false&limit=200"
         );
+        assert!(!url.contains("until_"), "{url}");
     }
 
     #[test]
@@ -700,8 +677,9 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for n in 0..1500 {
             let e = Event {
+                id: format!("id-{n}"),
                 severity: 13,
-                message: format!("problem {n}"),
+                message: String::new(),
                 service: String::new(),
             };
             remember_seen(&mut seen, std::slice::from_ref(&e));
@@ -719,26 +697,5 @@ mod tests {
         // Idempotent: syncing twice starts nothing twice.
         let (start, stop) = to_start_and_stop(&watched, &watched);
         assert!(start.is_empty() && stop.is_empty());
-    }
-
-    #[test]
-    fn the_url_carries_the_cursor_only_when_there_is_one() {
-        let first = logs_url("http://127.0.0.1:42617", None);
-        assert_eq!(
-            first,
-            "http://127.0.0.1:42617/api/logs?severity_min=13&hide_internal=false&limit=200"
-        );
-        let next = logs_url(
-            "http://127.0.0.1:42617",
-            Some(&Cursor {
-                segment: "seg 7".into(),
-                line_offset: 42,
-            }),
-        );
-        assert!(next.contains("until_line_offset=42"), "{next}");
-        assert!(
-            next.contains("until_segment_cursor=seg%207"),
-            "a cursor is the gateway's string, not ours: {next}"
-        );
     }
 }

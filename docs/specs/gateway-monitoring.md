@@ -61,6 +61,12 @@ event carrying `id`, `@timestamp`, `severity_number`, `severity_text`,
   paginated query over the persisted JSONL event store, with
   `severity_min`, `hide_internal`, `limit` and a cursor
   (`until_segment_cursor` + `until_line_offset`).
+- **That cursor pages BACKWARDS, and the watcher must not use it.** Checked
+  against a live gateway: the page fetched with the cursor from the previous
+  answer was a minute OLDER, not newer. A watcher following it walks deeper
+  into the past every minute and never sees today — which is what the first
+  build did, silently. Every poll asks for the newest page instead; what is
+  new is decided here, by event id.
 - The events are structured (`zeroclaw_log::LogEvent`): an `id`, a
   `Severity`, an `EventCategory`, an `EventOutcome`.
 - **The id is per OCCURRENCE, not per problem**, which the first live test
@@ -78,8 +84,22 @@ event carrying `id`, `@timestamp`, `severity_number`, `severity_text`,
   expected a string" — for the whole page. A watcher that goes silent
   because voltd changed a field is worse than one that reads a little less
   of it, so an unreadable field is empty and the page still arrives.
-- **Warnings are worth saying, once.** That failure is a Warn, not an
-  Error — so notifying only on Error would have said nothing at all.
+- **Warnings are worth saying, once — and again if they come back.** That
+  failure is a Warn, not an Error, so notifying only on Error would have
+  said nothing. A message already announced stays quiet for 30 minutes;
+  after that the same failure is news again, because a watcher that
+  mentioned something once in the morning and never again is a watcher that
+  missed it.
+
+### Windows drops a toast with no AppUserModelID
+
+The first watched build raised its notifications into nothing: `show()`
+returned success and no toast appeared. Windows matches a toast to an
+installed app by the `AppUserModelID` stamped on its Start-menu shortcut,
+and our NSIS hook — which renames the shortcut to «Вольт Админ» — was
+recreating it rather than renaming it, so the stamp was lost (checked:
+`Вольт Админ.lnk -> AUMID = ''`, next to a sibling app's
+`ru.metalmon.volt`). It renames the file now, property store and all.
 - The store is bounded by the daemon's own config
   (`[observability] log_persistence_max_entries`), and a daemon with
   persistence off answers `persistence_enabled: false` instead of serving a
